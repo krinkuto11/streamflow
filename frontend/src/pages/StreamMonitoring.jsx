@@ -1,15 +1,16 @@
-import { useState, useEffect } from 'react';
-import { Play, Square, Trash2, Plus, Activity, AlertCircle, LayoutGrid, List, MoreVertical } from 'lucide-react';
+import { lazy, Suspense, useState, useEffect, useRef } from 'react';
+import { Play, Square, Trash2, Plus, Activity, AlertCircle, LayoutGrid, List, X, ArrowRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { getSessionHealth, sortMonitoringSessions, toggleVisibleSessionSelection } from '@/lib/monitoring-session-display';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { useToast } from '@/hooks/use-toast';
 import { streamSessionsAPI } from '@/services/streamSessions';
 import CreateSessionDialog from '@/components/stream-monitoring/CreateSessionDialog';
-import SessionMonitorView from '@/components/stream-monitoring/SessionMonitorView';
+
+const SessionMonitorView = lazy(() => import('@/components/stream-monitoring/SessionMonitorView'));
 
 function StreamMonitoring() {
   const [sessions, setSessions] = useState([]);
@@ -20,23 +21,32 @@ function StreamMonitoring() {
   const [sessionToDelete, setSessionToDelete] = useState(null);
   const [selectedSession, setSelectedSession] = useState(null);
   const { toast } = useToast();
-  const [viewMode, setViewMode] = useState('grid');
+  const [viewMode, setViewMode] = useState('list');
+  const [sessionFilter, setSessionFilter] = useState('active');
+  const [loadError, setLoadError] = useState(false);
 
   const [selectedSessions, setSelectedSessions] = useState(new Set());
+  const activeSessionCountRef = useRef(0);
 
   useEffect(() => {
+    if (selectedSession) return undefined;
+    let stopped = false;
+    let timer;
+    const poll = async () => {
+      if (document.visibilityState === 'visible') await loadSessions(false);
+      if (!stopped) timer = setTimeout(poll, activeSessionCountRef.current > 0 ? 5000 : 15000);
+    };
     loadSessions();
-
-    // Poll for updates every 5 seconds for active sessions
-    const interval = setInterval(() => {
-      if (selectedSession) {
-        // Refresh will happen in SessionMonitorView
-      } else {
-        loadSessions(false); // Don't show loading on interval refresh
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
+    timer = setTimeout(poll, 5000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') loadSessions(false);
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [selectedSession]);
 
   const loadSessions = async (showLoading = true) => {
@@ -44,27 +54,25 @@ function StreamMonitoring() {
       if (showLoading) {
         setLoading(true);
       }
-      const [allResult, activeResult] = await Promise.allSettled([
-        streamSessionsAPI.getSessions(),
-        streamSessionsAPI.getSessions('active'),
-      ]);
+      const response = await streamSessionsAPI.getSessions();
+      const standardAll = response.data || [];
+      const standardActive = standardAll.filter(session => session.is_active);
 
-      if (allResult.status !== 'fulfilled' || activeResult.status !== 'fulfilled') {
-        throw new Error('Failed to load standard sessions');
-      }
-
-      const standardAll = allResult.value.data || [];
-      const standardActive = activeResult.value.data || [];
-
-      setSessions(standardAll);
-      setActiveSessions(standardActive);
+      setSessions(sortMonitoringSessions(standardAll));
+      setLoadError(false);
+      setSelectedSessions(previous => new Set([...previous].filter(id => standardAll.some(session => session.session_id === id))));
+      setActiveSessions(sortMonitoringSessions(standardActive));
+      activeSessionCountRef.current = standardActive.length;
     } catch (err) {
       console.error('Failed to load sessions:', err);
-      toast({
-        title: 'Error',
-        description: 'Failed to load monitoring sessions',
-        variant: 'destructive'
-      });
+      setLoadError(true);
+      if (showLoading) {
+        toast({
+          title: 'Error',
+          description: 'Failed to load monitoring sessions',
+          variant: 'destructive'
+        });
+      }
     } finally {
       if (showLoading) {
         setLoading(false);
@@ -212,16 +220,8 @@ function StreamMonitoring() {
     setSelectedSessions(newSelected);
   };
 
-  const toggleSelectAll = (filteredSessions) => {
-    if (selectedSessions.size === filteredSessions.length && filteredSessions.length > 0) {
-      // Deselect all
-      setSelectedSessions(new Set());
-    } else {
-      // Select all visible
-      const newSelected = new Set();
-      filteredSessions.forEach(s => newSelected.add(s.session_id));
-      setSelectedSessions(newSelected);
-    }
+  const toggleSelectAll = (visibleSessions) => {
+    setSelectedSessions(previous => toggleVisibleSessionSelection(previous, visibleSessions));
   };
 
   const handleBatchStop = async () => {
@@ -284,252 +284,137 @@ function StreamMonitoring() {
     }
   };
 
+  const visibleSessions = sessionFilter === 'active' ? activeSessions : sessions;
+  const quarantinedSessions = activeSessions.filter(session => session.quarantined_count > 0);
+  const reviewCount = activeSessions.reduce((total, session) => total + (session.review_count || 0), 0);
+  const allVisibleSelected = visibleSessions.length > 0 && visibleSessions.every(session => selectedSessions.has(session.session_id));
+
   return (
     <>
-      {/* If viewing a specific session, show the monitor view */}
       {selectedSession ? (
-        <SessionMonitorView
-          sessionId={selectedSession?.session_id}
-          onBack={handleBackToList}
-          onStop={() => handleStopSession(selectedSession)}
-        />
+        <Suspense fallback={<div className="flex min-h-64 items-center justify-center text-sm text-muted-foreground" role="status">Loading session details...</div>}>
+          <SessionMonitorView
+            sessionId={selectedSession.session_id}
+            onBack={handleBackToList}
+            onStop={() => handleStopSession(selectedSession)}
+          />
+        </Suspense>
       ) : (
-        <div className="space-y-6 relative pb-20">
-          {/* Header */}
-          <div className="flex justify-between items-start">
-            <div>
-              <h1 className="text-3xl font-bold tracking-tight">Stream Monitoring</h1>
-              <p className="text-muted-foreground mt-2">
-                Advanced event-based stream quality monitoring with live reliability scoring
-              </p>
-            </div>
-            <Button onClick={() => setCreateDialogOpen(true)}>
-              <Plus className="h-4 w-4 mr-2" />
-              New Session
+        <div className="min-w-0 space-y-5">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1">
+            <h1 className="text-3xl font-bold tracking-tight">Monitoring</h1>
+            <Button className="min-h-11 px-3 sm:px-4" onClick={() => setCreateDialogOpen(true)}>
+              <Plus className="mr-1.5 h-4 w-4" aria-hidden="true" /> New session
             </Button>
+            <p className="col-span-2 text-sm text-muted-foreground">Watch stream quality and investigate source issues.</p>
           </div>
 
-          {/* Info Alert */}
-          <Alert>
-            <Activity className="h-4 w-4" />
-            <AlertDescription>
-              Stream monitoring sessions provide continuous quality assessment for live events.
-              Streams are tested, scored by reliability, and monitored with screenshots to ensure
-              optimal stream selection in Dispatcharr.
-            </AlertDescription>
-          </Alert>
-
-          {/* Tabs */}
-          <Tabs defaultValue="active" className="w-full">
-            <div className="flex justify-between items-center mb-4">
-              <TabsList>
-                <TabsTrigger value="active">
-                  Active Sessions ({activeSessions.length})
-                </TabsTrigger>
-                <TabsTrigger value="all">
-                  All Sessions ({sessions.length})
-                </TabsTrigger>
-              </TabsList>
-
-              <div className="flex items-center gap-2">
-                <div className="flex border rounded-md mr-2">
-                  <Button
-                    variant={viewMode === 'grid' ? 'secondary' : 'ghost'}
-                    size="sm"
-                    className="h-8 w-8 p-0 rounded-r-none"
-                    onClick={() => setViewMode('grid')}
-                  >
-                    <LayoutGrid className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant={viewMode === 'list' ? 'secondary' : 'ghost'}
-                    size="sm"
-                    className="h-8 w-8 p-0 rounded-l-none"
-                    onClick={() => setViewMode('list')}
-                  >
-                    <List className="h-4 w-4" />
-                  </Button>
-                </div>
-
-                {((sessions.length > 0)) && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      if (selectedSessions.size > 0) {
-                        setSelectedSessions(new Set());
-                      }
-                    }}
-                    disabled={selectedSessions.size === 0}
-                  >
-                    {selectedSessions.size > 0 ? `Deselect (${selectedSessions.size})` : 'Select Items'}
-                  </Button>
-                )}
-              </div>
-            </div>
-
-            {/* Active Sessions Tab */}
-            <TabsContent value="active" className="space-y-4">
-              {loading ? (
-                <div className="text-center py-12">
-                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
-                  <p className="text-muted-foreground">Loading sessions...</p>
-                </div>
-              ) : activeSessions.length === 0 ? (
-                <Card>
-                  <CardContent className="pt-6">
-                    <div className="text-center py-12">
-                      <AlertCircle className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                      <h3 className="text-lg font-medium mb-2">No Active Sessions</h3>
-                      <p className="text-muted-foreground mb-4">
-                        Create a new monitoring session to start tracking stream quality
-                      </p>
-                      <Button onClick={() => setCreateDialogOpen(true)}>
-                        <Plus className="h-4 w-4 mr-2" />
-                        Create Session
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              ) : (
-                <>
-                  <div className="flex justify-end mb-2">
-                    <Button variant="ghost" size="sm" onClick={() => toggleSelectAll(activeSessions)}>
-                      {selectedSessions.size === activeSessions.length && activeSessions.length > 0 ? 'Deselect All' : 'Select All Active'}
-                    </Button>
-                  </div>
-                  {viewMode === 'grid' ? (
-                    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                      {activeSessions.map((session) => (
-                        <SessionCard
-                          key={session.session_id}
-                          session={session}
-                          onView={handleViewSession}
-                          onStop={handleStopSession}
-                          onDelete={handleDeleteSession}
-                          selected={selectedSessions.has(session.session_id)}
-                          onToggleSelection={toggleSelection}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <SessionTable
-                      sessions={activeSessions}
-                      onView={handleViewSession}
-                      onStop={handleStopSession}
-                      onDelete={handleDeleteSession}
-                      onStart={handleStartSession}
-                      selectedSessions={selectedSessions}
-                      onToggleSelection={toggleSelection}
-                      onToggleSelectAll={() => toggleSelectAll(activeSessions)}
-                    />
-                  )}
-                </>
-              )}
-            </TabsContent>
-
-            {/* All Sessions Tab */}
-            <TabsContent value="all" className="space-y-4">
-              {loading ? (
-                <div className="text-center py-12">
-                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
-                  <p className="text-muted-foreground">Loading sessions...</p>
-                </div>
-              ) : sessions.length === 0 ? (
-                <Card>
-                  <CardContent className="pt-6">
-                    <div className="text-center py-12">
-                      <AlertCircle className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                      <h3 className="text-lg font-medium mb-2">No Sessions</h3>
-                      <p className="text-muted-foreground mb-4">
-                        Get started by creating your first monitoring session
-                      </p>
-                      <Button onClick={() => setCreateDialogOpen(true)}>
-                        <Plus className="h-4 w-4 mr-2" />
-                        Create Session
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              ) : (
-                <>
-                  <div className="flex justify-end mb-2">
-                    <Button variant="ghost" size="sm" onClick={() => toggleSelectAll(sessions)}>
-                      {selectedSessions.size === sessions.length && sessions.length > 0 ? 'Deselect All' : 'Select All'}
-                    </Button>
-                  </div>
-                  {viewMode === 'grid' ? (
-                    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                      {sessions.map((session) => (
-                        <SessionCard
-                          key={session.session_id}
-                          session={session}
-                          onView={handleViewSession}
-                          onStart={handleStartSession}
-                          onStop={handleStopSession}
-                          onDelete={handleDeleteSession}
-                          selected={selectedSessions.has(session.session_id)}
-                          onToggleSelection={toggleSelection}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <SessionTable
-                      sessions={sessions}
-                      onView={handleViewSession}
-                      onStop={handleStopSession}
-                      onDelete={handleDeleteSession}
-                      onStart={handleStartSession}
-                      selectedSessions={selectedSessions}
-                      onToggleSelection={toggleSelection}
-                      onToggleSelectAll={() => toggleSelectAll(sessions)}
-                    />
-                  )}
-                </>
-              )}
-            </TabsContent>
-          </Tabs>
-
-          {/* Floating Batch Action Bar */}
-          {selectedSessions.size > 0 && (
-            <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-popover border shadow-xl rounded-full px-6 py-3 flex items-center gap-4 z-50 animate-in slide-in-from-bottom-5">
-              <span className="font-medium text-sm">{selectedSessions.size} selected</span>
-              <div className="h-4 w-px bg-border" />
-              <Button size="sm" variant="secondary" onClick={handleBatchStop}>
-                <Square className="h-3 w-3 mr-2" />
-                Stop Selected
-              </Button>
-              <Button size="sm" variant="destructive" onClick={handleBatchDelete}>
-                <Trash2 className="h-3 w-3 mr-2" />
-                Delete Selected
-              </Button>
-              <Button size="icon" variant="ghost" className="h-6 w-6 rounded-full ml-2" onClick={() => setSelectedSessions(new Set())}>
-                <span className="sr-only">Close</span>
-                ×
-              </Button>
+          {loadError && (
+            <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
+              <span>{sessions.length ? 'Session refresh failed. The list may be out of date.' : 'Monitoring sessions could not be loaded.'}</span>
+              <Button variant="outline" className="min-h-11" onClick={() => loadSessions()}>Retry</Button>
             </div>
           )}
 
-          {/* Create Session Dialog */}
-          <CreateSessionDialog
-            open={createDialogOpen}
-            onOpenChange={setCreateDialogOpen}
-            onCreateSession={handleCreateSession}
-          />
+          {!loading && activeSessions.length > 0 && (
+            <div className="flex items-center justify-between gap-3 rounded-lg border bg-card px-3 py-3 sm:px-4">
+              <div className="flex min-w-0 items-start gap-3">
+                {quarantinedSessions.length > 0 ? <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" /> : <Activity className="mt-0.5 h-5 w-5 shrink-0 text-primary" aria-hidden="true" />}
+                <div>
+                  <p className="text-sm font-medium">
+                    {quarantinedSessions.length > 0
+                      ? `${quarantinedSessions.length} of ${activeSessions.length} active sessions with quarantined sources`
+                      : `${activeSessions.length} active ${activeSessions.length === 1 ? 'session' : 'sessions'}`}
+                  </p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {reviewCount > 0 ? `${reviewCount} ${reviewCount === 1 ? 'source' : 'sources'} under review` : 'Open a session for source measurements'}
+                  </p>
+                </div>
+              </div>
+              {quarantinedSessions.length > 0 && (
+                <Button variant="outline" className="min-h-11 shrink-0 px-3" onClick={() => handleViewSession(quarantinedSessions[0])}>
+                  Review <ArrowRight className="ml-2 hidden h-4 w-4 sm:block" aria-hidden="true" />
+                </Button>
+              )}
+            </div>
+          )}
 
-          {/* Delete Confirmation Dialog */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <Tabs value={sessionFilter} onValueChange={setSessionFilter} className="min-w-0">
+              <TabsList className="h-auto">
+                <TabsTrigger className="min-h-11 px-3" value="active">Active ({activeSessions.length})</TabsTrigger>
+                <TabsTrigger className="min-h-11 px-3" value="all">All sessions ({sessions.length})</TabsTrigger>
+              </TabsList>
+            </Tabs>
+            {visibleSessions.length > 0 && (
+              <label className="inline-flex min-h-11 cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+                <input type="checkbox" className="h-4 w-4 accent-primary" checked={allVisibleSelected} onChange={() => toggleSelectAll(visibleSessions)} />
+                <span className="sm:hidden">Select all</span><span className="hidden sm:inline">Select all shown</span>
+              </label>
+            )}
+          </div>
+
+          {loading ? (
+            <div className="py-12 text-center" role="status">
+              <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-b-2 border-primary" />
+              <p className="text-sm text-muted-foreground">Loading sessions...</p>
+            </div>
+          ) : visibleSessions.length === 0 && !loadError ? (
+            <Card>
+              <CardContent className="flex flex-col items-center px-5 py-10 text-center">
+                <Activity className="mb-3 h-8 w-8 text-muted-foreground" aria-hidden="true" />
+                <h2 className="text-lg font-medium">{sessionFilter === 'active' ? 'No active sessions' : 'No monitoring sessions'}</h2>
+                <p className="mt-2 max-w-md text-sm text-muted-foreground">Use New session to monitor a channel or group. Quality measurements, source status and recovery controls will appear here.</p>
+                {sessionFilter === 'active' && sessions.length > 0 && <Button className="mt-3 min-h-11" variant="outline" onClick={() => setSessionFilter('all')}>View previous sessions</Button>}
+              </CardContent>
+            </Card>
+          ) : visibleSessions.length > 0 && (
+            <section aria-label={sessionFilter === 'active' ? 'Active monitoring sessions' : 'All monitoring sessions'} className="space-y-2">
+              {selectedSessions.size > 0 && (
+                <div className="sticky top-2 z-20 flex flex-wrap items-center gap-2 rounded-lg border bg-popover p-3 shadow-sm" aria-label="Selected session actions">
+                  <span className="mr-auto text-sm font-medium">{selectedSessions.size} selected</span>
+                  <Button className="min-h-11" variant="secondary" onClick={handleBatchStop}><Square className="mr-2 h-4 w-4" aria-hidden="true" />Stop selected</Button>
+                  <Button className="min-h-11" variant="destructive" onClick={handleBatchDelete}><Trash2 className="mr-2 h-4 w-4" aria-hidden="true" />Delete selected</Button>
+                  <Button size="icon" variant="ghost" className="h-11 w-11" aria-label="Clear session selection" onClick={() => setSelectedSessions(new Set())}><X className="h-4 w-4" aria-hidden="true" /></Button>
+                </div>
+              )}
+              <div className={viewMode === 'grid' ? 'grid gap-3 md:grid-cols-2 2xl:grid-cols-3' : 'divide-y rounded-lg border bg-card'}>
+                {visibleSessions.map(session => (
+                  <SessionCard key={session.session_id} session={session} compact={viewMode === 'list'}
+                    onView={handleViewSession} onStart={handleStartSession} onStop={handleStopSession} onDelete={handleDeleteSession}
+                    selected={selectedSessions.has(session.session_id)} onToggleSelection={toggleSelection} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {sessions.length > 0 && (
+            <details className="text-sm text-muted-foreground">
+              <summary className="w-fit cursor-pointer rounded py-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">Display options</summary>
+              <div className="mt-1 flex w-fit items-center gap-1 rounded-md border p-0.5" aria-label="Session layout">
+                <Button variant={viewMode === 'list' ? 'secondary' : 'ghost'} className="min-h-11" onClick={() => setViewMode('list')} aria-pressed={viewMode === 'list'}>
+                  <List className="mr-2 h-4 w-4" aria-hidden="true" /> List view
+                </Button>
+                <Button variant={viewMode === 'grid' ? 'secondary' : 'ghost'} className="min-h-11" onClick={() => setViewMode('grid')} aria-pressed={viewMode === 'grid'}>
+                  <LayoutGrid className="mr-2 h-4 w-4" aria-hidden="true" /> Grid view
+                </Button>
+              </div>
+            </details>
+          )}
+
+          <details className="text-sm text-muted-foreground">
+            <summary className="w-fit cursor-pointer rounded py-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">About monitoring</summary>
+            <p className="max-w-3xl pb-2 leading-relaxed">Monitoring sessions track live reliability and manage stream selection in Dispatcharr. Sources move between stable, review and quarantine states. FFmpeg sessions can include screenshots and live previews; OpenStream sessions show swarm health. Open a session to inspect source measurements and use quarantine or revive controls.</p>
+          </details>
+
+          <CreateSessionDialog open={createDialogOpen} onOpenChange={setCreateDialogOpen} onCreateSession={handleCreateSession} />
           <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>Delete Session</AlertDialogTitle>
-                <AlertDialogDescription>
-                  Are you sure you want to delete this session? This will remove all associated data including metrics and screenshots. This action cannot be undone.
-                </AlertDialogDescription>
+                <AlertDialogTitle>Delete session</AlertDialogTitle>
+                <AlertDialogDescription>Delete this session and its metrics and screenshots? This action cannot be undone.</AlertDialogDescription>
               </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={confirmDeleteSession}>Delete</AlertDialogAction>
-              </AlertDialogFooter>
+              <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={confirmDeleteSession}>Delete</AlertDialogAction></AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
         </div>
@@ -538,252 +423,42 @@ function StreamMonitoring() {
   );
 }
 
-// Session Card Component
-function SessionCard({ session, onView, onStart, onStop, onDelete, selected, onToggleSelection }) {
-  const formatDate = (timestamp) => {
-    return new Date(timestamp * 1000).toLocaleString();
-  };
-
+export function SessionCard({ session, compact = false, onView, onStart, onStop, onDelete, selected, onToggleSelection }) {
+  const health = getSessionHealth(session);
+  const healthColor = {
+    warning: 'text-amber-700 dark:text-amber-400', review: 'text-blue-700 dark:text-blue-400',
+    stable: 'text-emerald-700 dark:text-emerald-400', unknown: 'text-muted-foreground',
+  }[health.tone];
   return (
-    <Card
-      className={`hover:shadow-lg transition-shadow cursor-pointer relative group ${selected ? 'ring-2 ring-primary border-primary' : ''}`}
-      onClick={() => onView(session)}
-    >
-      <div
-        className="absolute top-3 right-3 z-10"
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggleSelection(session.session_id);
-        }}
-      >
-        <div className={`h-5 w-5 rounded border flex items-center justify-center transition-colors ${selected ? 'bg-primary border-primary text-primary-foreground' : 'bg-background/80 border-input hover:bg-accent'}`}>
-          {selected && <div className="h-2.5 w-2.5 rounded-sm bg-current" />}
+    <article className={`${compact ? 'p-4 xl:grid xl:grid-cols-[minmax(0,1fr)_minmax(180px,0.7fr)_auto] xl:items-center xl:gap-5' : 'rounded-lg border bg-card p-4'} min-w-0 ${selected ? 'bg-primary/5 ring-1 ring-inset ring-primary' : ''}`} aria-label={`${session.channel_name} monitoring session`}>
+      <div className="flex min-w-0 items-start gap-2">
+        <label className="flex h-11 w-8 shrink-0 cursor-pointer items-center justify-center">
+          <input type="checkbox" className="h-4 w-4 accent-primary" checked={selected} onChange={() => onToggleSelection(session.session_id)} aria-label={`Select ${session.channel_name}`} />
+        </label>
+        {session.channel_logo_url && <img src={session.channel_logo_url} alt="" className="mt-1 h-9 w-9 shrink-0 rounded bg-muted object-contain p-1" onError={event => { event.target.style.display = 'none'; }} />}
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="break-words text-base font-semibold">{session.channel_name}</h2>
+            <Badge variant={session.is_active ? 'default' : 'secondary'}>{session.is_active ? 'Active' : 'Inactive'}</Badge>
+          </div>
+          {session.epg_event_title && <p className="mt-1 truncate text-sm text-muted-foreground" title={session.epg_event_title}>{session.epg_event_title}</p>}
+          <p className="mt-1 text-xs text-muted-foreground">{session.session_type === 'openstream' ? 'OpenStream' : 'FFmpeg'} <span aria-hidden="true"> &middot; </span> Created {new Date(session.created_at * 1000).toLocaleString()}</p>
         </div>
       </div>
-
-      <CardHeader>
-        <div className="flex justify-between items-start gap-3">
-          {/* Channel Logo */}
-          {session.channel_logo_url && (
-            <div className="flex-shrink-0">
-              <img
-                src={session.channel_logo_url}
-                alt={session.channel_name}
-                className="h-12 w-12 object-contain rounded-md bg-white/5 p-1"
-                onError={(e) => { e.target.style.display = 'none'; }}
-              />
-            </div>
-          )}
-          <div className="flex-1 min-w-0 pr-6"> {/* Padding for checkbox */}
-            <CardTitle className="text-lg">{session.channel_name}</CardTitle>
-            <div className="mt-1">
-              <Badge variant="secondary">Standard</Badge>
-            </div>
-            {session.epg_event_title && (
-              <p className="text-sm font-medium text-primary mt-1 truncate" title={session.epg_event_title}>
-                {session.epg_event_title}
-              </p>
-            )}
-            <CardDescription className="mt-1">
-              Created {formatDate(session.created_at)}
-            </CardDescription>
-          </div>
-          <Badge variant={session.is_active ? 'default' : 'secondary'} className="flex-shrink-0">
-            {session.is_active ? 'Active' : 'Inactive'}
-          </Badge>
+      <div className={`mt-3 ${compact ? 'xl:mt-0' : ''}`}>
+        <p className={`text-sm font-medium ${healthColor}`}>{health.label}</p>
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground" aria-label="Source counts">
+          <span>{health.stable} stable</span><span>{health.review} in review</span><span>{health.quarantined} quarantined</span>
         </div>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-3">
-          {/* Stats */}
-          {/* Stats */}
-          <div className="grid grid-cols-3 gap-2 text-sm text-center">
-            <div className="bg-green-50 dark:bg-green-900/20 p-2 rounded-md">
-              <p className="text-xs text-green-700 dark:text-green-400 font-medium">Stable</p>
-              <p className="font-bold text-green-800 dark:text-green-300">{session.stable_count || 0}</p>
-            </div>
-            <div className="bg-blue-50 dark:bg-blue-900/20 p-2 rounded-md">
-              <p className="text-xs text-blue-700 dark:text-blue-400 font-medium">Review</p>
-              <p className="font-bold text-blue-800 dark:text-blue-300">{session.review_count || 0}</p>
-            </div>
-            <div className="bg-amber-50 dark:bg-amber-900/20 p-2 rounded-md">
-              <p className="text-xs text-amber-700 dark:text-amber-400 font-medium">Quarantined</p>
-              <p className="font-bold text-amber-800 dark:text-amber-300">{session.quarantined_count || 0}</p>
-            </div>
-          </div>
-
-
-
-
-          {/* Actions */}
-          <div className="flex gap-2 pt-2" onClick={(e) => e.stopPropagation()}>
-            {session.is_active ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => onStop(session)}
-                className="flex-1"
-              >
-                <Square className="h-3 w-3 mr-1" />
-                Stop
-              </Button>
-            ) : (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => onStart(session)}
-                className="flex-1"
-              >
-                <Play className="h-3 w-3 mr-1" />
-                Start
-              </Button>
-            )}
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => onDelete(session)}
-            >
-              <Trash2 className="h-3 w-3" />
-            </Button>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-// Session Table Component
-function SessionTable({
-  sessions,
-  onView,
-  onStart,
-  onStop,
-  onDelete,
-  selectedSessions,
-  onToggleSelection,
-  onToggleSelectAll
-}) {
-  const formatDate = (timestamp) => {
-    return new Date(timestamp * 1000).toLocaleString();
-  };
-
-  const allSelected = sessions.length > 0 && sessions.every(s => selectedSessions.has(s.session_id));
-
-  return (
-    <div className="rounded-md border bg-card">
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="border-b bg-muted/50">
-            <tr>
-              <th className="h-10 w-[40px] px-4 text-left align-middle font-medium">
-                <div
-                  className={`h-4 w-4 rounded border flex items-center justify-center cursor-pointer transition-colors ${allSelected ? 'bg-primary border-primary text-primary-foreground' : 'bg-background border-input hover:bg-accent'}`}
-                  onClick={onToggleSelectAll}
-                >
-                  {allSelected && <div className="h-2 w-2 rounded-sm bg-current" />}
-                </div>
-              </th>
-              <th className="h-10 px-4 text-left align-middle font-medium">Channel</th>
-              <th className="h-10 px-4 text-left align-middle font-medium hidden md:table-cell">Status</th>
-              <th className="h-10 px-4 text-center align-middle font-medium hidden sm:table-cell">Streams</th>
-              <th className="h-10 px-4 text-left align-middle font-medium hidden lg:table-cell">Created</th>
-              <th className="h-10 px-4 text-right align-middle font-medium">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {sessions.map((session) => {
-              const isSelected = selectedSessions.has(session.session_id);
-              return (
-                <tr
-                  key={session.session_id}
-                  className={`group transition-colors hover:bg-muted/50 cursor-pointer ${isSelected ? 'bg-muted/30' : ''}`}
-                  onClick={() => onView(session)}
-                >
-                  <td className="p-4 align-middle" onClick={(e) => e.stopPropagation()}>
-                    <div
-                      className={`h-4 w-4 rounded border flex items-center justify-center cursor-pointer transition-colors ${isSelected ? 'bg-primary border-primary text-primary-foreground' : 'bg-background border-input hover:bg-accent'}`}
-                      onClick={() => onToggleSelection(session.session_id)}
-                    >
-                      {isSelected && <div className="h-2 w-2 rounded-sm bg-current" />}
-                    </div>
-                  </td>
-                  <td className="p-4 align-middle">
-                    <div className="flex items-center gap-3">
-                      {session.channel_logo_url && (
-                        <img
-                          src={session.channel_logo_url}
-                          alt=""
-                          className="h-8 w-8 object-contain rounded bg-white/5 p-0.5"
-                          onError={(e) => { e.target.style.display = 'none'; }}
-                        />
-                      )}
-                      <div className="min-w-0">
-                        <p className="font-medium truncate">{session.channel_name}</p>
-                        <p className="text-xs text-muted-foreground">Standard</p>
-                        {session.epg_event_title && (
-                          <p className="text-xs text-muted-foreground truncate" title={session.epg_event_title}>
-                            {session.epg_event_title}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  </td>
-                  <td className="p-4 align-middle hidden md:table-cell">
-                    <Badge variant={session.is_active ? 'default' : 'secondary'}>
-                      {session.is_active ? 'Active' : 'Inactive'}
-                    </Badge>
-                  </td>
-                  <td className="p-4 align-middle hidden sm:table-cell">
-                    <div className="flex justify-center gap-2">
-                      <span className="text-green-500 font-bold" title="Stable">{session.stable_count || 0}</span>
-                      <span className="text-blue-500 font-bold" title="Review">{session.review_count || 0}</span>
-                      <span className="text-amber-500 font-bold" title="Quarantined">{session.quarantined_count || 0}</span>
-                    </div>
-                  </td>
-                  <td className="p-4 align-middle text-muted-foreground hidden lg:table-cell">
-                    {formatDate(session.created_at)}
-                  </td>
-                  <td className="p-4 align-middle text-right" onClick={(e) => e.stopPropagation()}>
-                    <div className="flex justify-end gap-1">
-                      {session.is_active ? (
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                          onClick={() => onStop(session)}
-                          title="Stop"
-                        >
-                          <Square className="h-4 w-4" />
-                        </Button>
-                      ) : (
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                          onClick={() => onStart(session)}
-                          title="Start"
-                        >
-                          <Play className="h-4 w-4" />
-                        </Button>
-                      )}
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                        onClick={() => onDelete(session)}
-                        title="Delete"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
       </div>
-    </div>
+      <div className={`mt-4 flex flex-wrap items-center gap-2 ${compact ? 'xl:mt-0' : ''}`}>
+        <Button variant="outline" className="min-h-11 flex-1 text-primary xl:flex-none" onClick={() => onView(session)} aria-label={`View details for ${session.channel_name}`}>View details</Button>
+        <Button size="icon" variant="ghost" className="h-11 w-11 shrink-0" onClick={() => session.is_active ? onStop(session) : onStart(session)} aria-label={`${session.is_active ? 'Stop' : 'Start'} ${session.channel_name}`} title={session.is_active ? 'Stop monitoring' : 'Start monitoring'}>
+          {session.is_active ? <Square className="h-4 w-4" aria-hidden="true" /> : <Play className="h-4 w-4" aria-hidden="true" />}
+        </Button>
+        <Button size="icon" variant="ghost" className="h-11 w-11 shrink-0 text-muted-foreground hover:text-destructive" onClick={() => onDelete(session)} aria-label={`Delete ${session.channel_name}`} title="Delete session"><Trash2 className="h-4 w-4" aria-hidden="true" /></Button>
+      </div>
+    </article>
   );
 }
 

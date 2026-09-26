@@ -21,6 +21,7 @@ const CHANNEL_LOGO_PREFIX = 'streamflow_channel_logo_';
 function SessionMonitorView({ sessionId, onBack, onStop }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [aliveScreenshots, setAliveScreenshots] = useState([]);
   const [logoUrl, setLogoUrl] = useState(null);
   const [playingStreamIds, setPlayingStreamIds] = useState(new Set());
@@ -28,10 +29,12 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
   const [isLive, setIsLive] = useState(true); // Whether we are following the latest updates
   const [zoomLevel, setZoomLevel] = useState(60); // Window size in seconds (default 1 minute)
   const [activePreviewTab, setActivePreviewTab] = useState("");
-  const [showTimeline, setShowTimeline] = useState(true);
+  const [showTimeline, setShowTimeline] = useState(false);
   const [expandedStreamId, setExpandedStreamId] = useState(null);
   const { toast } = useToast();
   const latestTimestampRef = useRef(null);
+  const sessionActiveRef = useRef(true);
+  const auxiliaryPollRef = useRef({ playing: 0, screenshots: 0 });
 
   // Helper to find the metric closest to the cursor time
   const getSnapshotAtTime = (stream, time) => {
@@ -109,32 +112,47 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
   }, [session?.channel_id, session?.channel_logo_url]);
 
   useEffect(() => {
-    loadSession();
-    if (activePreviewTab === 'screenshots') {
-      loadAliveScreenshots();
-    }
-    loadPlayingStreams();
+    latestTimestampRef.current = null;
+    sessionActiveRef.current = true;
+    auxiliaryPollRef.current = { playing: 0, screenshots: 0 };
+    setSession(null);
+    setLoading(true);
+    setLoadError(false);
+  }, [sessionId]);
 
-    // Poll for updates every 2 seconds if active
-    const interval = setInterval(() => {
-      // Use setSession functional update to check if session is active before polling
-      setSession(currentSession => {
-        if (currentSession && !currentSession.is_active) {
-          clearInterval(interval);
-          return currentSession;
+  useEffect(() => {
+    let stopped = false;
+    let timer;
+    const poll = async () => {
+      if (document.visibilityState === 'visible' && sessionActiveRef.current) {
+        const now = Date.now();
+        const requests = [loadSession()];
+        if (now - auxiliaryPollRef.current.playing >= 5000) {
+          auxiliaryPollRef.current.playing = now;
+          requests.push(loadPlayingStreams());
         }
-        // These calls are async, we can't easily wait for them here, 
-        // but loadSession itself will skip if it sees inactive (actually it should be stopped by interval clear)
-        if (activePreviewTab === 'screenshots') {
-          loadAliveScreenshots();
+        if (activePreviewTab === 'screenshots' && now - auxiliaryPollRef.current.screenshots >= 5000) {
+          auxiliaryPollRef.current.screenshots = now;
+          requests.push(loadAliveScreenshots());
         }
-        loadPlayingStreams();
-        loadSession();
-        return currentSession;
-      });
-    }, 2000);
-
-    return () => clearInterval(interval);
+        await Promise.all(requests);
+      }
+      if (!stopped && sessionActiveRef.current) timer = setTimeout(poll, 2000);
+    };
+    if (activePreviewTab === 'screenshots' && !sessionActiveRef.current) void loadAliveScreenshots();
+    void poll();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && sessionActiveRef.current) {
+        clearTimeout(timer);
+        void poll();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [sessionId, activePreviewTab]);
 
   const loadPlayingStreams = async () => {
@@ -149,6 +167,7 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
   const loadSession = async () => {
     try {
       const response = await streamSessionsAPI.getSession(sessionId, latestTimestampRef.current);
+      setLoadError(false);
       
       // Update ref with latest timestamp from response
       let maxTime = latestTimestampRef.current || response.data.created_at || 0;
@@ -161,13 +180,15 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
         });
       }
       latestTimestampRef.current = maxTime;
+      sessionActiveRef.current = Boolean(response.data.is_active);
 
       setSession(currentSession => {
         if (!currentSession) return response.data;
 
         // Merge streams and their metrics
+        const previousById = new Map(currentSession.streams.map(stream => [stream.stream_id, stream]));
         const mergedStreams = response.data.streams.map(newStream => {
-          const prevStream = currentSession.streams.find(s => s.stream_id === newStream.stream_id);
+          const prevStream = previousById.get(newStream.stream_id);
           if (prevStream) {
             const existingTimestamps = new Set(prevStream.metrics_history?.map(m => m.timestamp) || []);
             const newMetrics = (newStream.metrics_history || []).filter(m => !existingTimestamps.has(m.timestamp));
@@ -202,6 +223,7 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
       setLoading(false);
     } catch (err) {
       console.error('Failed to load session:', err);
+      setLoadError(true);
       // Suppress toast if we already have session data (session exists and we are just refreshing)
       if (!session) {
         toast({
@@ -438,6 +460,16 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
   }, [session]);
 
 
+  if (!loading && !session && loadError) {
+    return <div className="space-y-4 rounded-lg border p-6" role="alert">
+      <p>Session details could not be loaded.</p>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="outline" className="min-h-11" onClick={onBack}>Back to sessions</Button>
+        <Button className="min-h-11" onClick={() => loadSession()}>Retry</Button>
+      </div>
+    </div>;
+  }
+
   if (loading || !session) {
     return (
       <div className="text-center py-12">
@@ -448,11 +480,12 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
   }
 
   return (
-    <div className="space-y-6 min-w-0">
+    <div className="min-w-0 space-y-5 pb-16">
+      {loadError && <p role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">Session refresh failed. These measurements may be out of date.</p>}
       {/* Header with Channel Logo and EPG Info */}
-      <div className="flex items-center justify-between min-w-0 gap-4">
+      <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4 min-w-0">
-          <Button variant="ghost" size="icon" onClick={onBack}>
+          <Button variant="ghost" size="icon" className="h-11 w-11 shrink-0" aria-label="Back to monitoring sessions" onClick={onBack}>
             <ArrowLeft className="h-5 w-5" />
           </Button>
           {logoUrl && (
@@ -460,13 +493,13 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
               <img
                 src={logoUrl}
                 alt={session.channel_name}
-                className="h-16 w-16 object-contain rounded-md bg-white/5 p-1"
+                className="h-11 w-11 object-contain rounded-md bg-muted p-1"
                 onError={(e) => { e.target.style.display = 'none'; }}
               />
             </div>
           )}
           <div className="min-w-0">
-            <h1 className="text-3xl font-bold tracking-tight truncate">{session.channel_name}</h1>
+            <h1 className="truncate text-2xl font-bold tracking-tight sm:text-3xl">{session.channel_name}</h1>
             <p className="text-muted-foreground mt-1 truncate">
               Session Monitor - {session.is_active ? 'Active' : 'Inactive'}
             </p>
@@ -474,7 +507,7 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
         </div>
         <div className="flex gap-2">
           {session.is_active && (
-            <Button variant="outline" onClick={onStop}>
+            <Button variant="outline" className="min-h-11 w-full sm:w-auto" onClick={onStop}>
               <Square className="h-4 w-4 mr-2" />
               Stop Monitoring
             </Button>
@@ -482,60 +515,134 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
         </div>
       </div>
 
-      {/* EPG Event Information */}
-      {(session.epg_event_title || session.epg_event_description) && (
-        <Card className="bg-gradient-to-r from-primary/5 to-primary/10 border-primary/20">
-          <CardHeader>
-            <div className="flex items-start justify-between">
-              <div className="space-y-1 flex-1">
-                <CardTitle className="text-xl">{session.epg_event_title || 'Current Program'}</CardTitle>
-                {session.epg_event_description && (
-                  <CardDescription className="text-base mt-2">
-                    {session.epg_event_description}
-                  </CardDescription>
-                )}
-              </div>
-            </div>
-          </CardHeader>
-          {(session.epg_event_start || session.epg_event_end) && (
+      <dl className="grid grid-cols-2 gap-x-6 gap-y-4 border-y py-4 sm:grid-cols-4">
+        <SessionStat label="Total sources" value={session.streams.length} />
+        <SessionStat label="Stable" value={stableStreams.length} className="text-emerald-700 dark:text-emerald-400" />
+        <SessionStat label="Under review" value={reviewStreams.length} className="text-blue-700 dark:text-blue-400" />
+        <SessionStat label="Quarantined" value={quarantinedStreams.length} className="text-amber-700 dark:text-amber-400" />
+      </dl>
+      <p className="text-sm text-muted-foreground">Average reliability of stable and review sources: <span className="font-medium text-foreground">{activeStreams.length > 0 ? `${calculateAverageScore(activeStreams)}%` : 'No measurements'}</span></p>
+
+      {/* Streams Tables */}
+      <Tabs defaultValue="stable" className="min-w-0 w-full">
+        <TabsList className="grid h-auto w-full grid-cols-3 sm:inline-flex sm:w-auto">
+          <TabsTrigger className="min-h-11 min-w-0 whitespace-normal px-2 text-xs sm:px-3 sm:text-sm" value="stable">
+            Stable ({stableStreams.length})
+          </TabsTrigger>
+          <TabsTrigger className="min-h-11 min-w-0 whitespace-normal px-2 text-xs sm:px-3 sm:text-sm" value="review">
+            Review ({reviewStreams.length})
+          </TabsTrigger>
+          <TabsTrigger className="min-h-11 min-w-0 whitespace-normal px-2 text-xs sm:px-3 sm:text-sm" value="quarantined">
+            Quarantined ({quarantinedStreams.length})
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="stable" className="min-w-0">
+          <Card>
+            <CardHeader>
+              <CardTitle>Stable Streams</CardTitle>
+              <CardDescription>
+                Streams that have passed review and are considered reliable.
+              </CardDescription>
+            </CardHeader>
             <CardContent>
-              <div className="flex gap-6 text-sm">
-                {session.epg_event_start && (
-                  <div className="flex items-center gap-2">
-                    <Clock className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-muted-foreground">Start:</span>
-                    <span className="font-medium">{new Date(session.epg_event_start).toLocaleString()}</span>
-                  </div>
-                )}
-                {session.epg_event_end && (
-                  <div className="flex items-center gap-2">
-                    <Clock className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-muted-foreground">End:</span>
-                    <span className="font-medium">{new Date(session.epg_event_end).toLocaleString()}</span>
-                  </div>
-                )}
-              </div>
+              {stableStreams.length === 0 ? (
+                <div className="text-center py-12">
+                  <AlertCircle className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                  <p className="text-muted-foreground">No stable streams</p>
+                </div>
+              ) : (
+                <StreamsTable
+                  streams={stableStreams}
+                  isOpenStream={session?.session_type === 'openstream'}
+                  sessionId={sessionId}
+                  onQuarantine={handleQuarantineStream}
+                  playingStreamIds={playingStreamIds}
+                  cursorTime={cursorTime}
+
+                  isLive={isLive}
+                  zoomLevel={zoomLevel}
+                  adPeriods={session?.ad_periods || []}
+                />
+              )}
             </CardContent>
-          )}
-        </Card>
-      )}
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="review" className="min-w-0">
+          <Card>
+            <CardHeader>
+              <CardTitle>Under Review</CardTitle>
+              <CardDescription>
+                New or revived streams being monitored for reliability before becoming stable.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {reviewStreams.length === 0 ? (
+                <div className="text-center py-12">
+                  <Activity className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                  <p className="text-muted-foreground">No streams under review</p>
+                </div>
+              ) : (
+                <StreamsTable
+                  streams={reviewStreams}
+                  isOpenStream={session?.session_type === 'openstream'}
+                  sessionId={sessionId}
+                  onQuarantine={handleQuarantineStream}
+                  playingStreamIds={playingStreamIds}
+                  cursorTime={cursorTime}
+                  isLive={isLive}
+                  zoomLevel={zoomLevel}
+                  isReview
+                  adPeriods={session?.ad_periods || []}
+                />
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="quarantined" className="min-w-0">
+          <Card>
+            <CardHeader>
+              <CardTitle>Quarantined Streams</CardTitle>
+              <CardDescription>
+                Streams that failed quality checks or are dead. They will be retried automatically after a cooldown.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {quarantinedStreams.length === 0 ? (
+                <div className="text-center py-12">
+                  <Activity className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                  <p className="text-muted-foreground">No quarantined streams</p>
+                </div>
+              ) : (
+                <StreamsTable
+                  streams={quarantinedStreams}
+                  isOpenStream={session?.session_type === 'openstream'}
+                  sessionId={sessionId}
+                  showQuarantined
+                  onRevive={handleReviveStream}
+                  adPeriods={session?.ad_periods || []}
+                />
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
 
       {/* Live Stream Preview */}
       {activeStreams.length > 0 && (
-        <Card className="overflow-hidden">
-          <CardHeader>
-            <CardTitle>Live Stream Preview</CardTitle>
-            <CardDescription>View screenshots and live streams from active streams</CardDescription>
-          </CardHeader>
-          <CardContent>
+        <details className="min-w-0 overflow-hidden rounded-lg border bg-card" onToggle={event => { if (!event.currentTarget.open) setActivePreviewTab(''); }}>
+          <summary className="cursor-pointer rounded-lg px-4 py-4 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">Screenshots and live previews</summary>
+          <div className="min-w-0 px-4 pb-4">
             <Tabs value={activePreviewTab} onValueChange={setActivePreviewTab} className="w-full">
-              <TabsList className="mb-4">
-                <TabsTrigger value="screenshots">Screenshots</TabsTrigger>
-                <TabsTrigger value="live">Live Streams</TabsTrigger>
+              <TabsList className="mb-4 h-auto max-w-full">
+                <TabsTrigger className="min-h-11" value="screenshots">Screenshots</TabsTrigger>
+                <TabsTrigger className="min-h-11" value="live">Live Streams</TabsTrigger>
               </TabsList>
 
               {!activePreviewTab && (
-                <div className="text-center py-12 text-muted-foreground border-2 border-dashed rounded-lg bg-muted/10">
+                <div className="rounded-lg border border-dashed bg-muted/10 px-3 py-5 text-center text-sm text-muted-foreground">
                   <p>Select a preview mode above to view stream activity</p>
                 </div>
               )}
@@ -544,10 +651,10 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
                 {activePreviewTab === 'screenshots' && (
                   aliveScreenshots.length > 0 ? (
                     <div className="w-full relative overflow-hidden">
-                      <div className="overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-gray-400 scrollbar-track-gray-200 dark:scrollbar-thumb-gray-600 dark:scrollbar-track-gray-800" style={{ maxWidth: 'calc(100vw - 400px)' }}>
+                      <div className="max-w-full overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-gray-400 scrollbar-track-gray-200 dark:scrollbar-thumb-gray-600 dark:scrollbar-track-gray-800">
                         <div className="flex gap-4 pb-4">
                           {aliveScreenshots.map((screenshot) => (
-                            <div key={screenshot.stream_id} className="flex-none w-80">
+                            <div key={screenshot.stream_id} className="w-64 flex-none sm:w-80">
                               <Card>
                                 <CardContent className="p-4">
                                   <div className="aspect-video bg-black rounded-md overflow-hidden mb-3">
@@ -590,173 +697,34 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
                 )}
               </TabsContent>
             </Tabs>
-          </CardContent>
-        </Card>
+          </div>
+        </details>
       )}
 
-      {/* Stats Cards */}
-      <div className="grid gap-4 md:grid-cols-4">
-        <StatsCard
-          title="Total Streams"
-          value={session.streams.length}
-          icon={Activity}
-        />
-        <StatsCard
-          title="Active Streams"
-          value={activeStreams.length}
-          icon={Activity}
-          variant="success"
-        />
-        <StatsCard
-          title="Quarantined"
-          value={quarantinedStreams.length}
-          icon={AlertCircle}
-          variant="warning"
-        />
-        <StatsCard
-          title="Avg Reliability"
-          value={calculateAverageScore(activeStreams)}
-          suffix="%"
-          icon={Activity}
-        />
-      </div>
+      {(session.epg_event_title || session.epg_event_description) && (
+        <details className="rounded-lg border bg-card">
+          <summary className="cursor-pointer rounded-lg px-4 py-3 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
+            {session.epg_event_title || 'Programme details'}
+          </summary>
+          <div className="space-y-2 px-4 pb-4 text-sm text-muted-foreground">
+            {session.epg_event_description && <p>{session.epg_event_description}</p>}
+            {session.epg_event_start && <p>Start: {new Date(session.epg_event_start).toLocaleString()}</p>}
+            {session.epg_event_end && <p>End: {new Date(session.epg_event_end).toLocaleString()}</p>}
+          </div>
+        </details>
+      )}
 
-      {/* Streams Tables */}
-      <Tabs defaultValue="stable" className="w-full">
-        <TabsList>
-          <TabsTrigger value="stable">
-            Stable ({stableStreams.length})
-          </TabsTrigger>
-          <TabsTrigger value="review">
-            Under Review ({reviewStreams.length})
-          </TabsTrigger>
-          <TabsTrigger value="quarantined">
-            Quarantined ({quarantinedStreams.length})
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="stable">
-          <Card>
-            <CardHeader>
-              <CardTitle>Stable Streams</CardTitle>
-              <CardDescription>
-                Streams that have passed review and are considered reliable.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {stableStreams.length === 0 ? (
-                <div className="text-center py-12">
-                  <AlertCircle className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                  <p className="text-muted-foreground">No stable streams</p>
-                </div>
-              ) : (
-                <StreamsTable
-                  streams={stableStreams}
-                  isOpenStream={session?.session_type === 'openstream'}
-                  sessionId={sessionId}
-                  onQuarantine={handleQuarantineStream}
-                  playingStreamIds={playingStreamIds}
-                  cursorTime={cursorTime}
-
-                  isLive={isLive}
-                  zoomLevel={zoomLevel}
-                  adPeriods={session?.ad_periods || []}
-                />
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="review">
-          <Card>
-            <CardHeader>
-              <CardTitle>Under Review</CardTitle>
-              <CardDescription>
-                New or revived streams being monitored for reliability before becoming stable.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {reviewStreams.length === 0 ? (
-                <div className="text-center py-12">
-                  <Activity className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                  <p className="text-muted-foreground">No streams under review</p>
-                </div>
-              ) : (
-                <StreamsTable
-                  streams={reviewStreams}
-                  isOpenStream={session?.session_type === 'openstream'}
-                  sessionId={sessionId}
-                  onQuarantine={handleQuarantineStream}
-                  playingStreamIds={playingStreamIds}
-                  cursorTime={cursorTime}
-                  isLive={isLive}
-                  zoomLevel={zoomLevel}
-                  isReview
-                  adPeriods={session?.ad_periods || []}
-                />
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="quarantined">
-          <Card>
-            <CardHeader>
-              <CardTitle>Quarantined Streams</CardTitle>
-              <CardDescription>
-                Streams that failed quality checks or are dead. They will be retried automatically after a cooldown.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {quarantinedStreams.length === 0 ? (
-                <div className="text-center py-12">
-                  <Activity className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                  <p className="text-muted-foreground">No quarantined streams</p>
-                </div>
-              ) : (
-                <StreamsTable
-                  streams={quarantinedStreams}
-                  isOpenStream={session?.session_type === 'openstream'}
-                  sessionId={sessionId}
-                  showQuarantined
-                  onRevive={handleReviveStream}
-                  adPeriods={session?.ad_periods || []}
-                />
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
-
-      {/* Floating Timeline Button (Shows when timeline is hidden) */}
       {!showTimeline && (
-        <div className="fixed bottom-6 right-6 z-[60] animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <Button
-            onClick={() => setShowTimeline(true)}
-            className="group relative overflow-hidden bg-zinc-950 hover:bg-zinc-900 text-white border border-white/10 rounded-full h-12 px-6 shadow-[0_8px_30px_rgb(0,0,0,0.4)] flex items-center gap-2 transition-all hover:scale-105 active:scale-95"
-          >
-            <div className="absolute inset-0 bg-gradient-to-r from-primary/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-            <div className="relative flex items-center gap-2">
-              <span className="text-sm font-semibold tracking-wide">Show Timeline</span>
-              <ChevronUp className="h-4 w-4 text-primary animate-bounce-subtle" />
-            </div>
+        <div className="fixed bottom-20 right-4 z-30 lg:bottom-6 lg:right-6">
+          <Button variant="outline" onClick={() => setShowTimeline(true)} className="min-h-11 gap-2 rounded-full bg-card px-5 shadow-lg">
+            Show Timeline <ChevronUp className="h-4 w-4" aria-hidden="true" />
           </Button>
-          <style jsx>{`
-            @keyframes bounce-subtle {
-              0%, 100% { transform: translateY(0); }
-              50% { transform: translateY(-3px); }
-            }
-            .animate-bounce-subtle {
-              animation: bounce-subtle 2s ease-in-out infinite;
-            }
-          `}</style>
         </div>
       )}
 
       {/* Timeline Control */}
-      {session && (
+      {session && showTimeline && (
         <TimelineControl
-          className={!showTimeline ? 'hidden' : ''}
           minTime={minTime}
           maxTime={maxTime}
           currentTime={cursorTime || maxTime}
@@ -776,26 +744,12 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
   );
 }
 
-// Stats Card Component
-function StatsCard({ title, value, suffix = '', icon: Icon, variant = 'default' }) {
-  const variantColors = {
-    default: 'text-foreground',
-    success: 'text-green-600 dark:text-green-400',
-    warning: 'text-yellow-600 dark:text-yellow-400',
-  };
-
+function SessionStat({ label, value, className = '' }) {
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-sm font-medium">{title}</CardTitle>
-        <Icon className="h-4 w-4 text-muted-foreground" />
-      </CardHeader>
-      <CardContent>
-        <div className={`text-2xl font-bold ${variantColors[variant]}`}>
-          {value}{suffix}
-        </div>
-      </CardContent>
-    </Card>
+    <div className="min-w-0">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className={`mt-1 text-2xl font-semibold tabular-nums ${className}`}>{value}</dd>
+    </div>
   );
 }
 
@@ -830,6 +784,7 @@ const TransportHealthBadge = ({ status, summary, errorDensity }) => {
 
 // Streams Table Component
 function StreamsTable({ streams, isOpenStream = false, sessionId, onQuarantine, onRevive, playingStreamIds = new Set(), showQuarantined = false, isReview = false, cursorTime, isLive, zoomLevel, adPeriods = [] }) {
+  const [expandedChartId, setExpandedChartId] = useState(null);
   const formatQuality = (stream) => {
     if (!stream.width || !stream.height) return 'Unknown';
     return `${stream.width}x${stream.height}`;
@@ -860,8 +815,10 @@ function StreamsTable({ streams, isOpenStream = false, sessionId, onQuarantine, 
   };
 
   return (
-    <div className="overflow-x-auto">
-      <Table>
+    <div className="min-w-0 max-w-full">
+      <p className="mb-2 text-xs text-muted-foreground xl:hidden">Scroll sideways to see all source measurements and controls.</p>
+      <div className="max-w-full overflow-x-auto rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" role="region" aria-label="Source measurements" tabIndex={0}>
+      <Table className="min-w-[900px]">
         <TableHeader>
           <TableRow>
             <TableHead className="w-12">#</TableHead>
@@ -900,7 +857,7 @@ function StreamsTable({ streams, isOpenStream = false, sessionId, onQuarantine, 
             <React.Fragment key={stream.stream_id}>
               <TableRow>
                 <TableCell className="font-medium">{index + 1}</TableCell>
-                <TableCell className="max-w-xs">
+                <TableCell className="min-w-[180px] max-w-xs">
                   <div className="flex items-center gap-2">
                     <span className="truncate" title={stream.name}>
                       {stream.name}
@@ -929,14 +886,13 @@ function StreamsTable({ streams, isOpenStream = false, sessionId, onQuarantine, 
                   {stream.status === 'quarantined' && stream.status_reason === 'logo-mismatch' && stream.screenshot_url && (
                     <div className="mt-2 text-xs text-muted-foreground">
                       <p className="mb-1">Last seen:</p>
-                      <div className="w-24 aspect-video bg-black rounded overflow-hidden">
+                      <a className="block w-24 aspect-video bg-black rounded overflow-hidden focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" href={stream.screenshot_url} target="_blank" rel="noreferrer" aria-label={`Open logo mismatch screenshot for ${stream.name}`}>
                         <img
                           src={stream.screenshot_url}
                           alt="Logo mismatch screenshot"
-                          className="w-full h-full object-contain cursor-pointer transition-transform hover:scale-105"
-                          onClick={() => window.open(stream.screenshot_url, '_blank')}
+                          className="w-full h-full object-contain transition-transform hover:scale-105"
                         />
-                      </div>
+                      </a>
                     </div>
                   )}
                 </TableCell>
@@ -1038,8 +994,9 @@ function StreamsTable({ streams, isOpenStream = false, sessionId, onQuarantine, 
                           size="icon"
                           variant="outline"
                           onClick={() => onQuarantine(stream.stream_id)}
-                          className="h-8 w-8 text-orange-600 hover:text-orange-700 hover:bg-orange-50 dark:hover:bg-orange-950"
+                          className="h-11 w-11 text-orange-600 hover:text-orange-700 hover:bg-orange-50 dark:hover:bg-orange-950"
                           title="Quarantine"
+                          aria-label={`Quarantine ${stream.name}`}
                         >
                           <Ban className="h-4 w-4" />
                         </Button>
@@ -1059,6 +1016,8 @@ function StreamsTable({ streams, isOpenStream = false, sessionId, onQuarantine, 
                         size="sm"
                         variant="outline"
                         onClick={() => onRevive(stream.stream_id)}
+                        className="min-h-11"
+                        aria-label={`Revive ${stream.name}`}
                       >
                         <Activity className="h-3 w-3 mr-1" />
                         Revive
@@ -1069,8 +1028,18 @@ function StreamsTable({ streams, isOpenStream = false, sessionId, onQuarantine, 
               </TableRow>
               {!showQuarantined && (
                 <TableRow>
-                  <TableCell colSpan={10} className="bg-muted/30 p-2">
-                    <SpeedMetricsChart sessionId={sessionId} streamId={stream.stream_id} cursorTime={cursorTime} isLive={isLive} zoomLevel={zoomLevel} adPeriods={adPeriods} />
+                  <TableCell colSpan={10 + (isReview ? 1 : 0)} className="bg-muted/30 p-2">
+                    <button
+                      type="button"
+                      className="min-h-11 rounded px-2 py-1 text-xs font-semibold text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                      aria-expanded={expandedChartId === stream.stream_id}
+                      onClick={() => setExpandedChartId(current => current === stream.stream_id ? null : stream.stream_id)}
+                    >
+                      {expandedChartId === stream.stream_id ? 'Hide' : 'Show'} speed history for {stream.name}
+                    </button>
+                    {expandedChartId === stream.stream_id && (
+                      <SpeedMetricsChart sessionId={sessionId} streamId={stream.stream_id} cursorTime={cursorTime} isLive={isLive} zoomLevel={zoomLevel} />
+                    )}
                   </TableCell>
                 </TableRow>
               )}
@@ -1078,46 +1047,63 @@ function StreamsTable({ streams, isOpenStream = false, sessionId, onQuarantine, 
           ))}
         </TableBody>
       </Table>
+      </div>
     </div>
   );
 }
 
 // Speed Metrics Chart Component
-function SpeedMetricsChart({ sessionId, streamId, cursorTime, isLive, zoomLevel, adPeriods }) {
+function SpeedMetricsChart({ sessionId, streamId, cursorTime, isLive, zoomLevel }) {
   const [allMetrics, setAllMetrics] = useState([]);
   const [loading, setLoading] = useState(true);
+  const lastTimestampRef = useRef(null);
 
   useEffect(() => {
-    loadMetrics();
-
-    // Refresh metrics every 5 seconds
-    const interval = setInterval(loadMetrics, 5000);
-    return () => clearInterval(interval);
-  }, [sessionId, streamId]);
-
-  const lastTimestampRef = React.useRef(null);
-
-  const loadMetrics = async () => {
-    try {
-      const response = await streamSessionsAPI.getStreamMetrics(sessionId, streamId, lastTimestampRef.current);
-      const newMetrics = response.data?.metrics || [];
-      
-      if (newMetrics.length > 0) {
-        lastTimestampRef.current = newMetrics[newMetrics.length - 1].timestamp;
-        setAllMetrics(prev => {
-          // Prevent duplicates by checking the last timestamp
-          const filterPrev = prev.length > 0 && newMetrics[0].timestamp <= prev[prev.length - 1].timestamp 
-            ? prev.filter(p => p.timestamp < newMetrics[0].timestamp)
-            : prev;
-          return [...filterPrev, ...newMetrics];
-        });
+    let stopped = false;
+    let timer;
+    let polling = false;
+    const loadMetrics = async () => {
+      try {
+        const response = await streamSessionsAPI.getStreamMetrics(sessionId, streamId, lastTimestampRef.current);
+        if (stopped) return;
+        const newMetrics = response.data?.metrics || [];
+        if (newMetrics.length > 0) {
+          lastTimestampRef.current = newMetrics[newMetrics.length - 1].timestamp;
+          setAllMetrics(previous => {
+            const firstNewTimestamp = newMetrics[0].timestamp;
+            return [...previous.filter(metric => metric.timestamp < firstNewTimestamp), ...newMetrics].slice(-3600);
+          });
+        }
+      } catch (err) {
+        if (!stopped) console.error('Failed to load metrics:', err);
+      } finally {
+        if (!stopped) setLoading(false);
       }
-      setLoading(false);
-    } catch (err) {
-      console.error('Failed to load metrics:', err);
-      setLoading(false);
-    }
-  };
+    };
+    const poll = async () => {
+      if (stopped || polling) return;
+      polling = true;
+      try {
+        if (document.visibilityState === 'visible') await loadMetrics();
+      } finally {
+        polling = false;
+        if (!stopped) timer = setTimeout(poll, 5000);
+      }
+    };
+    void poll();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        clearTimeout(timer);
+        void poll();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [sessionId, streamId]);
 
   // Determine the reference time (end of the visible window)
   const referenceTime = useMemo(() => {
@@ -1167,11 +1153,7 @@ function SpeedMetricsChart({ sessionId, streamId, cursorTime, isLive, zoomLevel,
   };
 
   if (loading) {
-    return (
-      <div className="h-24 flex items-center justify-center text-muted-foreground text-sm">
-        Loading metrics...
-      </div>
-    );
+    return <div className="flex h-24 items-center justify-center text-sm text-muted-foreground">Loading metrics...</div>;
   }
 
   // If we have no metrics AT ALL for this stream (never recorded)
@@ -1536,13 +1518,14 @@ function LiveStreamPlayer({ stream, mpegtsLib, isExpanded, isActive, onToggleExp
                 playsInline
                 className="w-full h-full object-contain [&::-webkit-media-controls]:hidden [&::-webkit-media-controls-enclosure]:hidden"
               />
-              <div className="absolute top-2 right-2 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="absolute top-2 right-2 flex gap-2 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
                 <Button
                   size="sm"
                   variant="secondary"
-                  className="h-8 w-8 p-0"
+                  className="h-11 w-11 p-0"
                   onClick={handleToggleMute}
                   title={isMuted ? "Unmute" : "Mute"}
+                  aria-label={isMuted ? "Unmute stream" : "Mute stream"}
                 >
                   {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
                 </Button>
@@ -1551,9 +1534,10 @@ function LiveStreamPlayer({ stream, mpegtsLib, isExpanded, isActive, onToggleExp
                   <Button
                     size="sm"
                     variant="secondary"
-                    className="h-8 w-8 p-0"
+                    className="h-11 w-11 p-0"
                     onClick={onToggleExpand}
                     title={isExpanded ? "Minimize" : "Expand"}
+                    aria-label={isExpanded ? "Minimize stream preview" : "Expand stream preview"}
                   >
                     {isExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
                   </Button>

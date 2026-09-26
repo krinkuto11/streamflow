@@ -1,5 +1,7 @@
 from unittest.mock import Mock
 
+import pytest
+
 from apps.automation.automated_stream_manager import AutomatedStreamManager
 
 
@@ -117,3 +119,26 @@ def test_cycle_aborts_on_suspicious_stream_pool_drop(monkeypatch):
     # Safety gate should skip destructive operations.
     manager.validate_and_remove_non_matching_streams.assert_not_called()
     manager.discover_and_assign_streams.assert_not_called()
+
+
+def test_cycle_fails_before_matching_when_post_refresh_cache_sync_fails(monkeypatch):
+    manager = _build_manager(monkeypatch, m3u_enabled=True)
+    manager.refresh_playlists = Mock(return_value=(True, [{"id": 1, "name": "Account 1"}]))
+    manager._refresh_udi_cache_for_automation_cycle = Mock(return_value=True)
+    manager._wait_for_m3u_refresh_completion = Mock(return_value={
+        'ok': True,
+        'state': 'completed',
+        'message': 'Playlist refresh completed',
+    })
+    manager._sync_udi_cache_after_playlist_refresh = Mock(return_value=False)
+    monkeypatch.setattr(
+        'apps.automation.automated_stream_manager.get_streams',
+        lambda log_result=False: [{'id': 1, 'name': 'Existing stream'}],
+    )
+
+    with pytest.raises(RuntimeError, match='UDI cache sync failed'):
+        manager.run_automation_cycle(forced=True, forced_period_id='period-1')
+
+    manager.validate_and_remove_non_matching_streams.assert_not_called()
+    manager.discover_and_assign_streams.assert_not_called()
+    assert manager.get_run_status()['state'] == 'failed'

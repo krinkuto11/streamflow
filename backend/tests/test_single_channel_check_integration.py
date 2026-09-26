@@ -85,6 +85,7 @@ class TestSingleChannelCheckIntegration(unittest.TestCase):
         
         mock_automation_instance = Mock()
         mock_automation_class.return_value = mock_automation_instance
+        mock_automation_instance.validate_and_remove_non_matching_streams = Mock(return_value={})
         # Simulate that stream matching added the 4K stream
         mock_automation_instance.discover_and_assign_streams = Mock(return_value={'16': 1})
         

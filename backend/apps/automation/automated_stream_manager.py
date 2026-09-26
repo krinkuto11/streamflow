@@ -20,7 +20,7 @@ import copy
 from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Any, Union
+from typing import AbstractSet, Callable, Dict, Iterable, List, Optional, Tuple, Any, Union
 import concurrent.futures
 from collections import defaultdict
 
@@ -936,7 +936,8 @@ class RegexChannelMatcher:
                                stream_tvg_id: Optional[str] = None, channel_tvg_ids: Optional[Dict[str, str]] = None,
                                channel_match_priorities: Optional[Dict[str, List[str]]] = None,
                                channel_to_group_map: Optional[Dict[str, Any]] = None,
-                               channel_name_map: Optional[Dict[str, str]] = None) -> List[str]:
+                               channel_name_map: Optional[Dict[str, str]] = None,
+                               allowed_channel_ids: Optional[AbstractSet[str]] = None) -> List[str]:
         """
         Match a stream name and optionally TVG-ID to channels using regex patterns and TVG-ID matching.
         
@@ -946,6 +947,7 @@ class RegexChannelMatcher:
             stream_tvg_id: The TVG-ID of the stream (optional)
             channel_tvg_ids: Dictionary mapping channel_id -> tvg_id (optional, for optimization)
             channel_match_priorities: Dictionary mapping channel_id -> ['tvg', 'regex'] or ['regex', 'tvg'] (optional)
+            allowed_channel_ids: Optional target channel IDs for a single-channel check.
             
         Returns:
             List of channel IDs that match the stream
@@ -958,12 +960,17 @@ class RegexChannelMatcher:
         channel_to_group_map = channel_to_group_map or {}
         channel_name_map = channel_name_map or {}
 
-        # Iterate all target channels when available so group-only configs are considered.
-        explicit_channel_ids = set(self.channel_patterns.get("patterns", {}).keys())
-        if channel_tvg_ids:
-            explicit_channel_ids.update(str(cid) for cid in channel_tvg_ids.keys())
-        if channel_to_group_map:
-            explicit_channel_ids.update(str(cid) for cid in channel_to_group_map.keys())
+        # A single-channel check can evaluate only its requested channel. The
+        # effective config lookup below still handles channel and group patterns.
+        if allowed_channel_ids is not None:
+            explicit_channel_ids = {str(cid) for cid in allowed_channel_ids}
+        else:
+            # Include TVG and group-only channels in full-run matching.
+            explicit_channel_ids = set(self.channel_patterns.get("patterns", {}).keys())
+            if channel_tvg_ids:
+                explicit_channel_ids.update(str(cid) for cid in channel_tvg_ids.keys())
+            if channel_to_group_map:
+                explicit_channel_ids.update(str(cid) for cid in channel_to_group_map.keys())
 
         for channel_id in explicit_channel_ids:
             group_id = channel_to_group_map.get(str(channel_id))
@@ -3292,6 +3299,12 @@ class AutomatedStreamManager:
                     first_abort_message = result.get("message") or "Quality check was aborted"
             elif result.get("success") is False or result.get("error"):
                 failed_count += 1
+                if first_abort_message is None:
+                    first_abort_message = (
+                        result.get("error")
+                        or result.get("message")
+                        or "Quality check failed"
+                    )
 
         incomplete_count = max(0, expected_count - checked_count)
         stream_checker_busy = bool(
@@ -3304,7 +3317,7 @@ class AutomatedStreamManager:
             )
         )
         return {
-            "ok": aborted_count == 0 and incomplete_count == 0,
+            "ok": aborted_count == 0 and failed_count == 0 and incomplete_count == 0,
             "checked_count": checked_count,
             "expected_count": expected_count,
             "aborted_count": aborted_count,
@@ -3913,7 +3926,9 @@ class AutomatedStreamManager:
                              channel_tvg_map: Dict[str, str] = None,
                              channel_to_match_priorities: Dict[str, List[str]] = None,
                              channel_to_group_map: Dict[str, Any] = None,
-                             channel_name_map: Dict[str, str] = None) -> Tuple[Dict[str, List[str]], Dict[str, List[Dict]]]:
+                             channel_name_map: Dict[str, str] = None,
+                             dead_stream_urls: Optional[AbstractSet[str]] = None,
+                             allowed_channel_ids: Optional[AbstractSet[str]] = None) -> Tuple[Dict[str, List[str]], Dict[str, List[Dict]]]:
         """
         Process a batch of streams for regex matching.
         This method is designed to be run in a separate thread.
@@ -3925,6 +3940,8 @@ class AutomatedStreamManager:
             channel_to_revive_enabled: Mapping of channel IDs to their Stream Revival setting
             channel_tvg_map: Mapping of channel IDs to their TVG-ID (optional)
             channel_to_match_priorities: Mapping of channel IDs to priority order (optional)
+            dead_stream_urls: Immutable dead URL snapshot shared by this run's workers.
+            allowed_channel_ids: Optional target channel IDs for a single-channel check.
             
         Returns:
             Tuple of (assignments, assignment_details)
@@ -3937,6 +3954,9 @@ class AutomatedStreamManager:
         channel_to_group_map = channel_to_group_map or {}
         channel_name_map = channel_name_map or {}
         match_stream_to_channels = self.regex_matcher.match_stream_to_channels
+
+        if dead_stream_removal_enabled and dead_stream_urls is None:
+            raise RuntimeError("Dead stream snapshot unavailable for matching")
 
         # Cache match outcomes for repeated stream signatures inside this batch.
         stream_match_cache: Dict[Tuple[str, Any, Optional[str]], Tuple[str, ...]] = {}
@@ -3960,40 +3980,33 @@ class AutomatedStreamManager:
             
             matching_channels = stream_match_cache.get(match_cache_key)
             if matching_channels is None:
-                matching_channels = tuple(match_stream_to_channels(
-                    stream_name,
-                    stream_m3u_account,
-                    stream_tvg_id,
-                    channel_tvg_map,
-                    channel_to_match_priorities,
-                    channel_to_group_map,
-                    channel_name_map,
-                ))
+                match_args = (
+                    stream_name, stream_m3u_account, stream_tvg_id,
+                    channel_tvg_map, channel_to_match_priorities,
+                    channel_to_group_map, channel_name_map,
+                )
+                if allowed_channel_ids is None:
+                    matching_channels = tuple(match_stream_to_channels(*match_args))
+                else:
+                    matching_channels = tuple(match_stream_to_channels(
+                        *match_args, allowed_channel_ids=allowed_channel_ids,
+                    ))
                 stream_match_cache[match_cache_key] = matching_channels
 
             if not matching_channels:
                 continue
 
-            # Check if any matching channel allows reviving dead streams
-            any_revive_enabled = False
-            for ch_id in matching_channels:
-                if channel_to_revive_enabled.get(str(ch_id), False):
-                    any_revive_enabled = True
-                    break
-
-            # Skip dead streams if removal is enabled globally
-            if self.dead_streams_tracker and self.dead_streams_tracker.is_dead(stream_url):
-                if dead_stream_removal_enabled:
-                    # If any matched channel has Stream Revival enabled, we DON'T skip it, 
-                    # even if it's offline. We want it added so the checker can re-evaluate it.
-                    if any_revive_enabled:
-                        # logger.debug(f"Allowing dead stream {stream_id} for potential revival")
-                        pass
-                    else:
-                        # Revival is disabled for all matching channels - skip ALL dead streams
-                        # This prevents the continuous re-addition loop for low quality/failed streams
-                        # logger.debug(f"Skipping dead stream {stream_id} (revival disabled)")
-                        continue
+            # The shared snapshot avoids one SQLite session for every matched
+            # stream and makes a failed dead-state read fatal to matching.
+            if dead_stream_removal_enabled:
+                is_dead = stream_url in dead_stream_urls
+                if is_dead and not any(
+                    channel_to_revive_enabled.get(str(ch_id), False)
+                    for ch_id in matching_channels
+                ):
+                    # Revival is disabled for all matches: keep dead streams
+                    # out of assignment until a check revives them.
+                    continue
             
             for channel_id in matching_channels:
                 # Check if stream is already in this channel
@@ -4150,7 +4163,7 @@ class AutomatedStreamManager:
         """
         if not self._lock.acquire(blocking=False):
             logger.warning("Stream discovery already active - skipping concurrent request")
-            return {}
+            return {"success": False, "error": "Stream discovery is already active"}
         
         try:
             return self._discover_and_assign_streams_impl(force, skip_check_trigger, forced_period_id, skip_changelog, channel_id, allow_dead_streams=allow_dead_streams)
@@ -4214,6 +4227,10 @@ class AutomatedStreamManager:
         if not force and not self.config.get("enabled_features", {}).get("auto_stream_discovery", True):
             logger.info("Stream discovery is disabled in configuration")
             return {}
+
+        # The channel loops below reuse ``channel_id`` for their local channel.
+        # Preserve the caller's scope before those loops run.
+        requested_channel_id = channel_id
         
         try:
             # Reload patterns to ensure we have the latest changes
@@ -4621,21 +4638,59 @@ class AutomatedStreamManager:
                 dead_stream_removal_enabled = not allow_dead_streams
             else:
                 dead_stream_removal_enabled = self._is_dead_stream_removal_enabled()
+
+            dead_stream_urls = None
+            if dead_stream_removal_enabled:
+                try:
+                    if self.dead_streams_tracker is None:
+                        raise RuntimeError("dead stream tracker unavailable")
+                    dead_stream_urls = frozenset(self.dead_streams_tracker.get_dead_stream_reasons())
+                except Exception as snapshot_error:
+                    message = "Dead stream state unavailable; stream matching aborted"
+                    logger.error(
+                        "%s (%s)",
+                        message,
+                        type(snapshot_error).__name__,
+                    )
+                    self._update_run_progress(
+                        stage_key="stream_matching",
+                        current=0,
+                        total=total_streams,
+                        message=message,
+                    )
+                    return {
+                        "assignment_count": {},
+                        "assignment_details": [],
+                        "assigned_stream_ids": {},
+                        "channel_visibility_events": channel_visibility_events,
+                        "success": False,
+                        "error": message,
+                    }
             
             # Create batches
             batches = [all_streams[i:i + batch_size] for i in range(0, total_streams, batch_size)]
+            allowed_channel_ids = (
+                frozenset((str(requested_channel_id),))
+                if requested_channel_id is not None else None
+            )
             
             completed_count = 0
             last_log_pct = -1
             
             aborted = False
+            matching_error = None
             future_to_batch = {}
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
             try:
+                single_channel_match_kwargs = (
+                    {"allowed_channel_ids": allowed_channel_ids}
+                    if allowed_channel_ids is not None else {}
+                )
                 future_to_batch = {
                     executor.submit(self._match_streams_batch, batch, channel_streams, 
                                    dead_stream_removal_enabled,
-                                   channel_to_revive_enabled, channel_tvg_map, channel_to_match_priorities, channel_to_group_map, channel_name_map): batch 
+                                   channel_to_revive_enabled, channel_tvg_map, channel_to_match_priorities, channel_to_group_map, channel_name_map,
+                                   dead_stream_urls, **single_channel_match_kwargs): batch
                     for batch in batches
                 }
                 
@@ -4672,12 +4727,14 @@ class AutomatedStreamManager:
                              last_log_pct = current_pct
                              
                     except Exception as e:
-                        logger.error(f"Error in stream matching batch: {e}")
+                        matching_error = f"Stream matching batch failed: {e}"
+                        logger.exception(matching_error)
+                        break
             finally:
-                if aborted:
+                if aborted or matching_error:
                     for pending in future_to_batch:
                         pending.cancel()
-                    executor.shutdown(wait=False, cancel_futures=True)
+                    executor.shutdown(wait=not aborted, cancel_futures=True)
                 else:
                     executor.shutdown(wait=True)
 
@@ -4701,6 +4758,22 @@ class AutomatedStreamManager:
                     "success": False,
                     "error": message,
                 }
+
+            if matching_error:
+                self._update_run_progress(
+                    stage_key="stream_matching",
+                    current=completed_count,
+                    total=total_streams,
+                    message=matching_error,
+                )
+                return {
+                    "assignment_count": {},
+                    "assignment_details": [],
+                    "assigned_stream_ids": {},
+                    "channel_visibility_events": channel_visibility_events,
+                    "success": False,
+                    "error": matching_error,
+                }
             
             logger.info(f"✓ Completed processing {total_streams} streams. Found {sum(len(s) for s in assignments.values())} new stream assignments across {len(assignments)} channels")
             
@@ -4719,6 +4792,7 @@ class AutomatedStreamManager:
             # (allow_dead_streams caller override is already reflected in the variable.)
             
             # Assign streams to channels
+            assignment_errors = []
             for channel_id, stream_ids in assignments.items():
                 if stream_ids:
                     try:
@@ -4810,6 +4884,7 @@ class AutomatedStreamManager:
                         
                     except Exception as e:
                         logger.error(f"Failed to assign streams to channel {channel_id}: {e}")
+                        assignment_errors.append(f"channel {channel_id}: {e}")
             
             accepted_assignment_count = {
                 channel_id: count
@@ -4890,6 +4965,14 @@ class AutomatedStreamManager:
                 "assignment_details": detailed_assignments,
                 "assigned_stream_ids": dict(accepted_assigned_stream_ids),
                 "channel_visibility_events": channel_visibility_events,
+                **({
+                    "success": False,
+                    "error": (
+                        f"Stream assignment failed for {len(assignment_errors)} channel(s): "
+                        + "; ".join(assignment_errors[:3])
+                    ),
+                    "partial_writes": bool(accepted_assignment_count),
+                } if assignment_errors else {}),
             }
             
         except Exception as e:
@@ -4935,7 +5018,9 @@ class AutomatedStreamManager:
                 "channels_checked": 0,
                 "streams_removed": 0,
                 "channels_modified": 0,
-                "details": []
+                "details": [],
+                "success": False,
+                "error": "Stream validation is already active",
             }
             
         try:
@@ -4954,7 +5039,12 @@ class AutomatedStreamManager:
             
             if not all_channels:
                 logger.info("No channels found")
-                return False, []
+                return {
+                    "channels_checked": 0,
+                    "streams_removed": 0,
+                    "channels_modified": 0,
+                    "details": [],
+                }
             
             # Filter by profile if one is selected
             all_channels = self._filter_channels_by_profile(all_channels, "stream validation")
@@ -5088,6 +5178,7 @@ class AutomatedStreamManager:
             completed_count = 0
             
             aborted = False
+            validation_errors = []
             future_to_batch = {}
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
             try:
@@ -5140,13 +5231,23 @@ class AutomatedStreamManager:
                                         logger.info(f"✓ Removed {len(removed_streams)} non-matching stream(s) from {channel_name}")
                                     else:
                                         logger.error(f"Failed to update channel {channel_name} after validation")
+                                        validation_errors.append(
+                                            f"Dispatcharr rejected validation update for channel {channel_id}"
+                                        )
+                                        break
                                         
                                 except Exception as update_err:
                                     logger.error(f"Failed to update channel {channel_id}: {update_err}")
+                                    validation_errors.append(
+                                        f"Validation update failed for channel {channel_id}: {update_err}"
+                                    )
+                                    break
                             else:
                                 if len(removed_streams) > 0:
                                     # Log but don't apply — validate_existing_streams is disabled for this channel
                                     logger.debug(f"Found {len(removed_streams)} non-matching streams in channel {channel_id}, but validate_existing_streams is disabled for its profile")
+                        if validation_errors:
+                            break
                         
                         completed_count += len(future_to_batch[future])
                         # Log less frequently
@@ -5156,14 +5257,15 @@ class AutomatedStreamManager:
                              logger.info(f"  Validation progress: {int(completed_count/len(all_channels)*100)}%")
 
                     except Exception as e:
-                        logger.error(f"Error in channel validation batch: {e}")
-                    if aborted:
+                        logger.exception("Channel validation batch failed: %s", e)
+                        validation_errors.append(f"Channel validation batch failed: {e}")
+                    if aborted or validation_errors:
                         break
             finally:
-                if aborted:
+                if aborted or validation_errors:
                     for pending in future_to_batch:
                         pending.cancel()
-                    executor.shutdown(wait=False, cancel_futures=True)
+                    executor.shutdown(wait=not aborted, cancel_futures=True)
                 else:
                     executor.shutdown(wait=True)
 
@@ -5175,6 +5277,12 @@ class AutomatedStreamManager:
                     "Stream validation aborted after checking "
                     f"{validation_results['channels_checked']} channel(s)"
                 )
+                return validation_results
+
+            if validation_errors:
+                validation_results["success"] = False
+                validation_results["error"] = "; ".join(validation_errors[:3])
+                validation_results["partial_writes"] = bool(validation_results["channels_modified"])
                 return validation_results
             
             logger.info(f"Stream validation completed: Checked {validation_results['channels_checked']} channels, " +
@@ -5521,6 +5629,13 @@ class AutomatedStreamManager:
              
         return False
 
+    def _is_period_due_for_cycle(self, period_id: str, period_info: dict, due_cache: Dict[str, bool]) -> bool:
+        """Evaluate each period once during channel discovery in one scheduler cycle."""
+        key = str(period_id)
+        if key not in due_cache:
+            due_cache[key] = self._is_period_due(period_id, period_info)
+        return due_cache[key]
+
     def _refresh_udi_cache_for_automation_cycle(self) -> bool:
         """Refresh all UDI entities after an automation cycle completes.
 
@@ -5759,10 +5874,16 @@ class AutomatedStreamManager:
         
         logger.debug("Starting automation cycle...")
         automation_busy_guard = None
+        run_snapshot_active = False
+        previous_run_snapshot = None
 
         try:
             automation_busy_guard = get_udi_manager()
             automation_busy_guard.set_automation_busy()
+            begin_run_snapshot = getattr(automation_config, 'begin_run_snapshot', None)
+            if callable(begin_run_snapshot):
+                previous_run_snapshot = begin_run_snapshot()
+                run_snapshot_active = True
             if self._abort_run_if_manual_stop_requested():
                 return
 
@@ -5782,6 +5903,7 @@ class AutomatedStreamManager:
             active_periods = {} # {(period_id, period_name): {profile_id, profile_name, channels: []}}
             active_profile_ids = set()
             configured_period_channels: Dict[str, set] = {}
+            period_due_cache: Dict[str, bool] = {}
             
             for channel in channels:
                 channel_id = channel.get('id')
@@ -5800,7 +5922,7 @@ class AutomatedStreamManager:
                             continue
                             
                         # Check if the period is actually due
-                        if not forced and not forced_period_id and not self._is_period_due(p_id, period_info):
+                        if not forced and not forced_period_id and not self._is_period_due_for_cycle(p_id, period_info, period_due_cache):
                             continue
 
                         scheduler_retry = (
@@ -6240,19 +6362,19 @@ class AutomatedStreamManager:
                     if sync_ok:
                         logger.info("UDI cache synced after provider refresh")
                     else:
-                        logger.warning(
-                            "UDI cache sync after provider refresh reported warnings - "
-                            "proceeding with available cache"
+                        raise RuntimeError(
+                            "UDI cache sync failed after provider refresh; "
+                            "stream validation and assignment were not started"
                         )
                 except FetchCancelled:
                     if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                         return
                     raise
                 except Exception as _sync_err:
-                    logger.warning(
-                        f"UDI sync after provider refresh failed: {_sync_err} — "
-                        "proceeding with potentially stale cache"
-                    )
+                    raise RuntimeError(
+                        "UDI cache sync failed after provider refresh; "
+                        "stream validation and assignment were not started"
+                    ) from _sync_err
 
                 # Capture streams_after from the now-current cache for changelog and cleanup
                 changelog_tracking = self.config.get("enabled_features", {}).get("changelog_tracking", True)
@@ -6416,6 +6538,8 @@ class AutomatedStreamManager:
                             skip_changelog=True,
                         )
                     )
+                    if not isinstance(val_res, dict):
+                        raise RuntimeError("Stream validation returned an invalid result")
                     validation_details = val_res.get("details", [])
                     child_abort_message, child_abort_handled = self._handle_child_stage_abort(
                         val_res,
@@ -6429,8 +6553,11 @@ class AutomatedStreamManager:
                         refresh_success = False
                     elif self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                         return
+                    if val_res.get("success") is False or val_res.get("error"):
+                        raise RuntimeError(val_res.get("error") or "Stream validation failed")
                 except Exception as e:
                     logger.error(f"✗ Failed to validate streams: {e}")
+                    raise
                 if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                     return
 
@@ -6450,6 +6577,8 @@ class AutomatedStreamManager:
                             skip_changelog=True,
                         )
                     )
+                    if not isinstance(assign_res, dict):
+                        raise RuntimeError("Stream discovery returned an invalid result")
                     assignment_details = assign_res.get("assignment_details", [])
                     assigned_stream_ids = assign_res.get("assigned_stream_ids", {})
                     channel_visibility_events.extend(assign_res.get("channel_visibility_events", []) or [])
@@ -6465,9 +6594,12 @@ class AutomatedStreamManager:
                         refresh_success = False
                     elif self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                         return
+                    if assign_res.get("success") is False or assign_res.get("error"):
+                        raise RuntimeError(assign_res.get("error") or "Stream discovery failed")
                 except Exception as e:
                     logger.error(f"✗ Failed to assign streams: {e}")
                     assigned_stream_ids = {}
+                    raise
 
                 if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                     return
@@ -6510,6 +6642,8 @@ class AutomatedStreamManager:
 
                         channels_to_check_sync = []
                         _target_stream_ids = {}
+                        from apps.stream.stream_session_manager import get_session_manager
+                        monitoring_channels = get_session_manager().get_channels_in_active_sessions()
 
                         for ch_id in channels_to_quality_check:
                             if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
@@ -6517,6 +6651,12 @@ class AutomatedStreamManager:
                             # Normalise ch_id to int for all lookups. channels_to_quality_check
                             # may contain mixed int/str entries if populated from multiple sources.
                             _ch_id_int = int(ch_id)
+                            if _ch_id_int in monitoring_channels:
+                                logger.info(
+                                    "Skipping quality check for monitored channel %s",
+                                    _ch_id_int,
+                                )
+                                continue
                             check_all_streams = channel_check_all_streams.get(_ch_id_int, False)
                             logger.debug(
                                 f"Quality check loop: ch_id={ch_id!r}({type(ch_id).__name__}) "
@@ -7114,8 +7254,12 @@ class AutomatedStreamManager:
         finally:
             self._m3u_accounts_cache = None
             try:
-                if automation_busy_guard is not None:
-                    automation_busy_guard.clear_automation_busy()
+                try:
+                    if run_snapshot_active:
+                        automation_config.end_run_snapshot(previous_run_snapshot)
+                finally:
+                    if automation_busy_guard is not None:
+                        automation_busy_guard.clear_automation_busy()
             finally:
                 self._manual_stop_requested.clear()
                 if automation_checker_reserved:

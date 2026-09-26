@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Button } from '@/components/ui/button.jsx'
@@ -155,20 +156,20 @@ export default function UpcomingAutomationEvents() {
   const renderEvent = (event, isNext = false) => (
     <div
       key={`${event.period_id}-${event.time}`}
-      className={`flex items-start justify-between p-3 border rounded-lg ${isNext ? 'border-primary bg-primary/5' : 'hover:bg-accent/50'
+      className={`flex min-w-0 flex-wrap items-start justify-between gap-3 p-3 border rounded-lg ${isNext ? 'border-primary/30 bg-primary/5' : 'hover:bg-accent/50'
         } transition-colors`}
     >
-      <div className="flex-1 space-y-1">
-        <div className="flex items-center gap-2">
-          <span className="font-medium text-sm">{event.period_name}</span>
+      <div className="min-w-0 flex-1 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="break-words font-medium text-sm">{event.period_name}</span>
           {isNext && <Badge variant="default" className="text-xs">Next</Badge>}
         </div>
-        <div className="flex items-center gap-4 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <div className="flex items-center gap-1">
             <Clock className="h-3 w-3" />
             {formatDateTime(event.time)}
           </div>
-          <div>
+          <div className="break-words">
             Profiles: {event.profile_display || 'No Profile'}
           </div>
           <div>
@@ -176,7 +177,7 @@ export default function UpcomingAutomationEvents() {
           </div>
         </div>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         <Badge variant="outline" className="text-xs">
           {formatTime(event.time)}
         </Badge>
@@ -184,159 +185,85 @@ export default function UpcomingAutomationEvents() {
     </div>
   )
 
-  if (loading && !refreshing) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Upcoming Automation Events</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-          </div>
-        </CardContent>
-      </Card>
-    )
-  }
-
   const grouped = groupEventsByTime()
+  const additionalEventCount = Math.max(0, events.length - 1)
 
   return (
     <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <div>
-            <CardTitle>Upcoming Automation Events</CardTitle>
-            <CardDescription>
-              Scheduled automation runs based on configured periods
-            </CardDescription>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleRefresh}
-            disabled={refreshing}
-          >
-            <RefreshCw className={`h-4 w-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
-            Refresh
+      <CardHeader className="flex flex-col gap-2 pb-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <CardTitle className="flex items-center gap-2 text-base"><Calendar className="h-4 w-4 text-muted-foreground" />Upcoming schedule</CardTitle>
+          <CardDescription className="mt-1">Your next automated check</CardDescription>
+        </div>
+        <div className="flex flex-wrap items-center gap-1">
+          <Button variant="ghost" className="min-h-11" asChild><Link to="/scheduling">Manage schedule</Link></Button>
+          <Button variant="outline" size="icon" className="h-11 w-11" aria-label="Refresh upcoming schedule" onClick={handleRefresh} disabled={refreshing || loading}>
+            <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
           </Button>
         </div>
       </CardHeader>
-      <CardContent className="space-y-4">
-        {/* Filters */}
+      <CardContent className="space-y-3">
         {loadError && (
-          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
-            {loadError}
-          </div>
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300" role="status">{loadError}</div>
         )}
-
-        <div className="flex gap-4">
-          <div className="flex-1">
-            <div className="flex items-center gap-2 mb-2">
-              <Filter className="h-4 w-4 text-muted-foreground" />
-              <span className="text-sm font-medium">Filter by Period</span>
-            </div>
-            <Select value={periodFilter} onValueChange={setPeriodFilter}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Periods</SelectItem>
-                {allPeriods.map((period) => (
-                  <SelectItem key={period.id} value={period.id}>
-                    {period.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="flex-1">
-            <div className="flex items-center gap-2 mb-2">
-              <Calendar className="h-4 w-4 text-muted-foreground" />
-              <span className="text-sm font-medium">Time Range</span>
-            </div>
-            <Select value={timeRangeFilter} onValueChange={setTimeRangeFilter}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="6">Next 6 hours</SelectItem>
-                <SelectItem value="12">Next 12 hours</SelectItem>
-                <SelectItem value="24">Next 24 hours</SelectItem>
-                <SelectItem value="48">Next 2 days</SelectItem>
-                <SelectItem value="72">Next 3 days</SelectItem>
-                <SelectItem value="168">Next week</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-
-        {/* Global Disabled State */}
-        {!automationEnabled ? (
-          <div className="text-center py-12">
-            <Calendar className="h-12 w-12 mx-auto mb-4 opacity-50 text-muted-foreground" />
-            <p className="text-muted-foreground mb-2">Automation is Globally Disabled</p>
-            <p className="text-sm text-muted-foreground">
-              Enable "Regular Automation" in Automation Settings to resume schedules.
-            </p>
+        {loading && events.length === 0 ? (
+          <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground" role="status"><Loader2 className="h-4 w-4 animate-spin" />Loading upcoming schedule...</div>
+        ) : !automationEnabled ? (
+          <div className="text-sm">
+            <p className="font-medium">Regular automation is disabled</p>
+            <p className="mt-1 text-muted-foreground">Enable Regular Automation in Settings to resume scheduled runs.</p>
           </div>
         ) : events.length === 0 ? (
-          <div className="text-center py-12">
-            <Calendar className="h-12 w-12 mx-auto mb-4 opacity-50 text-muted-foreground" />
-            <p className="text-muted-foreground mb-2">No upcoming automation events</p>
-            <p className="text-sm text-muted-foreground">
-              {allPeriods.length === 0
-                ? 'Create automation periods to schedule events'
-                : 'Check your period schedules and channel assignments'}
-            </p>
+          <div className="text-sm">
+            <p className="font-medium">No upcoming events in this view</p>
+            <p className="mt-1 text-muted-foreground">{allPeriods.length === 0 ? 'Create a period to schedule your checks.' : 'Adjust the filters below or review your period schedules and channel assignments.'}</p>
           </div>
-        ) : (
-          <div className="space-y-4">
-            {/* Next Event */}
-            {grouped.next.length > 0 && (
-              <div className="space-y-2">
-                <h3 className="text-sm font-semibold text-primary">Next Event</h3>
-                {grouped.next.map(event => renderEvent(event, true))}
+        ) : grouped.next.map(event => renderEvent(event, true))}
+        <details className="border-t pt-2">
+          <summary className="cursor-pointer py-2 text-sm font-medium marker:text-primary">
+            {additionalEventCount > 0 && automationEnabled ? `${additionalEventCount} more scheduled events and filters` : 'Schedule filters'}
+          </summary>
+          <div className="mt-3 space-y-4">
+            <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+              <div className="min-w-0">
+                <label htmlFor="dashboard-period-filter" className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground"><Filter className="h-3.5 w-3.5" />Period</label>
+                <Select value={periodFilter} onValueChange={setPeriodFilter}>
+                  <SelectTrigger id="dashboard-period-filter" className="min-h-11"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All periods</SelectItem>
+                    {allPeriods.map(period => <SelectItem key={period.id} value={String(period.id)}>{period.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
               </div>
-            )}
-
-            {/* Soon (within 1 hour) */}
-            {grouped.soon.length > 0 && (
-              <div className="space-y-2">
-                <h3 className="text-sm font-semibold">Within 1 Hour</h3>
-                {grouped.soon.map(event => renderEvent(event))}
+              <div className="min-w-0">
+                <label htmlFor="dashboard-time-filter" className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground"><Clock className="h-3.5 w-3.5" />Time range</label>
+                <Select value={timeRangeFilter} onValueChange={setTimeRangeFilter}>
+                  <SelectTrigger id="dashboard-time-filter" className="min-h-11"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="6">Next 6 hours</SelectItem>
+                    <SelectItem value="12">Next 12 hours</SelectItem>
+                    <SelectItem value="24">Next 24 hours</SelectItem>
+                    <SelectItem value="48">Next 2 days</SelectItem>
+                    <SelectItem value="72">Next 3 days</SelectItem>
+                    <SelectItem value="168">Next week</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
-            )}
-
-            {/* Today (within 24 hours) */}
-            {grouped.today.length > 0 && (
-              <div className="space-y-2">
-                <h3 className="text-sm font-semibold">Today</h3>
-                <div className="space-y-2 max-h-[300px] overflow-y-auto">
-                  {grouped.today.map(event => renderEvent(event))}
-                </div>
+            </div>
+            {loading && <p className="flex items-center gap-2 text-xs text-muted-foreground" role="status"><Loader2 className="h-3.5 w-3.5 animate-spin" />Updating schedule...</p>}
+            {automationEnabled && [
+              ['Within one hour', grouped.soon],
+              ['Later today', grouped.today],
+              ['Upcoming', grouped.upcoming],
+            ].filter(([, items]) => items.length > 0).map(([title, items]) => (
+              <div key={title} className="space-y-2">
+                <h3 className="text-xs font-semibold text-muted-foreground">{title}</h3>
+                <div className="max-h-80 space-y-2 overflow-y-auto">{items.map(event => renderEvent(event))}</div>
               </div>
-            )}
-
-            {/* Upcoming (beyond 24 hours) */}
-            {grouped.upcoming.length > 0 && (
-              <div className="space-y-2">
-                <h3 className="text-sm font-semibold">Upcoming</h3>
-                <div className="space-y-2 max-h-[200px] overflow-y-auto">
-                  {grouped.upcoming.map(event => renderEvent(event))}
-                </div>
-              </div>
-            )}
+            ))}
+            {cachedAt && <p className="text-xs text-muted-foreground">Schedule updated {new Date(cachedAt).toLocaleTimeString()}</p>}
           </div>
-        )}
-
-        {/* Cache info */}
-        {cachedAt && (
-          <p className="text-xs text-muted-foreground text-center pt-4 border-t">
-            Last updated: {new Date(cachedAt).toLocaleTimeString()}
-          </p>
-        )}
+        </details>
       </CardContent>
     </Card>
   )

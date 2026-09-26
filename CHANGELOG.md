@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **PR #460 change record** - Added a [detailed changelog](docs/pr460-changelog.md) for the reliability, efficiency, security and responsive UI changes proposed against `dev`.
+- **Monitoring intervals** - Monitoring-session create requests now accept bounded evaluation and enforcement intervals (both default to 1,000 ms).
+- **Channel context and UI previews** - Compact Channel rows show effective automation profile state, and six synthetic-data desktop/mobile screenshots document the implemented Dashboard, Channels and Monitoring views.
 - **StreamFlow V3 reliability stack** - Draft-gated work for provider/profile-aware Stream Checker capacity, Teamarr managed-event preflight, Shadow Monitor continuity, startup progress, hardware diagnostics, and in-app operator Help.
 - **Detailed V3 changelog** - Added `docs/pr432-v3-changelog.md` so PR #432 has a readable branch-level changelog and validation record instead of relying on an oversized PR body.
 - **Detailed V4 changelog** - Added `docs/pr434-v4-changelog.md` so PR #434 tracks the release-hardening scope, image digest, live gates, screenshots, and remaining draft blockers outside the PR body.
@@ -17,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Automation run stream health metrics** - Added a dashboard `Good Streams` metric and a compact `Checking now` row for active quality batches.
 
 ### Changed
+- **Dispatcharr-aligned media tools** - Production and development images use the same pinned LinuxServer FFmpeg/ffprobe 8.1.2 build as the installed Dispatcharr image, with Python 3.11 in a separate virtual environment and the CPU container default retained.
+- **Core workspace and startup** - Dashboard, Channels and Monitoring use compact responsive layouts and accessible mobile navigation. Configured instances bootstrap from readiness instead of waiting for the setup-wizard connection diagnostic on each page load.
 - **Operator-facing progress and setup wording** - Clarified Stream Checker ETA labels, dashboard run counters, startup duration estimates, Teamarr timing buckets, Shadow Monitor switch limits, and Help `Where` locations.
 - **Help and setup guidance** - Keeps V3 Help platform neutral, points settings to visible UI or explicit status/API locations, and shows shipped UI screenshots as cropped, optimized, collapsible, lazy-loaded references.
 - **Stream Checker ETA** - Batch and full-run ETA now uses a conservative channel-throughput floor alongside stream-level progress, preventing long full checks from reporting unrealistically short remaining time.
@@ -26,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stream Checker ETA wording** - Provider-limited or floor-based estimates now display as `Rough ETA` with a tooltip explaining expected swings between long channel waits.
 
 ### Fixed
+- **Reported old streams retained after a check** - Stream-limit removals were misread as UDI cache misses and appended again. Concurrent and sequential write-back now protect genuine cache misses, then enforce the limit while preserving active-viewer streams; the original reporter's instance remains unverified.
+- **PR #460 run and assignment correctness** - Matching worker, validation, inventory and Dispatcharr write failures report failure; single-channel Step 4/5/6 errors stop later work. Channel assignments use per-channel serialization, authoritative preflight and readback.
+- **Manual Discover Streams response** - A successful structured discovery result now returns validated assignment counts in the existing response shape instead of failing when the result contains assigned channels.
+- **Quarantine, recovery and probe evidence** - Quarantined sources are excluded from monitoring fallback; manual revival and automatic Hidden → Unhidden recovery are confirmed without undoing a manual hide. FFmpeg keeps a measured bitrate across trailing zero progress and handles truncated visual evidence and interrupted probes explicitly.
+- **Section-scoped settings and channel loading** - Failed settings sections cannot overwrite unrelated configuration; Channel profile loading follows the visible search/page state and reports errors rather than showing an empty profile as a valid result.
 - **Scheduled runs now remove non-matching streams** - Stream removal is driven solely by the automation profile's `Validate Existing Streams` toggle. A hidden `automation_controls.remove_non_matching_streams` global (default off, exposed in no UI) previously short-circuited every scheduled run, so profiles with the toggle on only ever removed streams when the run was triggered manually from the dashboard. Manual runs correspondingly no longer force-remove streams for channels whose profile has the toggle off, and single-channel checks now honour the toggle too.
 - **Missing-bitrate rechecks** - Rechecks playable streams with no current bitrate serially after each channel's initial probes, keeps failed rechecks explicitly `N/A`, and treats older bitrate history as ranking-only evidence.
 - **Shadow configuration concurrency and scope** - Uses revision-guarded configuration saves, applies explicit monitor include scopes, and cancels affected probes when relevant Shadow settings change without overwriting the separately stored watcher key.
@@ -54,6 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Teamarr post-start bucket handling** - Teamarr Preflight catches configured `post_start_offsets_minutes` inside the configured post-start grace window instead of hard-coding one offset or missing buckets after long serialized checks.
 - **Teamarr stale stream refresh** - The `no_streams_yet` path refreshes the affected channel stream mapping before making the final decision, reducing false no-stream outcomes after Dispatcharr/Teamarr updates.
 - **Teamarr Preflight loading and queue display** - The Teamarr Preflight page no longer crashes while config/status data is still loading, and queued checks running through the Stream Checker queue are shown in the active/running area with the configured concurrency limit.
+
+### Performance
+- **Fewer repeated reads and writes** - Batched dead-stream snapshots, shared run configuration/provider inventory, fresh UDI metadata reuse, bounded telemetry queries, and skipped no-op monitoring PATCHes reduce work without changing provider probe duration.
+- **Narrower browser work** - Single-channel matching evaluates one channel's rules; Stream Checker avoids redundant progress/settings requests, and Monitoring loads charts and details when opened. Earlier path benchmarks and their scope are in the [PR #460 changelog](docs/pr460-changelog.md).
+
+### Security
+- **Bounded logo retrieval** - Logo URLs, redirects, response type and image bytes are validated before caching; local/metadata targets are restricted, the cache is bounded, and cached SVG/image responses receive defensive headers while supported LAN and Dispatcharr-relative logos remain usable.
+- **Safe API error responses** - Rejected logos return a generic 422 message. Manual stream discovery exposes validated numeric assignment counts on success and generic 409/500 failure responses with a safe partial-write flag, without echoing provider URLs or internal exception detail.
 
 ### Removed
 - **AceStream Monitoring** - Removed the unused AceStream Monitoring surface while keeping normal Stream Monitoring, Stream Checker, Shadow Monitor, and Teamarr Preflight intact.

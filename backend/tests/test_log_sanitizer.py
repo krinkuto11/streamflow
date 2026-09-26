@@ -36,8 +36,11 @@ class FakeDeadStreamDb:
     def get_dead_streams(self, as_dict=True):
         return self.dead_streams
 
+    def get_dead_stream_info(self, stream_url):
+        return self.dead_streams.get(stream_url)
+
     def remove_dead_stream(self, stream_url):
-        self.dead_streams.pop(stream_url, None)
+        return self.dead_streams.pop(stream_url, None) is not None
 
 
 class LogSanitizerTests(unittest.TestCase):

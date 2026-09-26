@@ -47,18 +47,22 @@ def test_update_channel_streams_keeps_protected_dead_stream(mock_get_udi, mock_p
     mock_get_udi.return_value = mock_udi
 
     mock_tracker = MagicMock()
-    mock_tracker.is_offline.side_effect = lambda url: "dead" in url
+    mock_tracker.get_dead_stream_reasons.return_value = {
+        "http://example.test/protected-dead.m3u8": "offline",
+        "http://example.test/dead.m3u8": "offline",
+    }
     mock_tracker_cls.return_value = mock_tracker
 
     mock_response = Mock()
     mock_response.status_code = 200
     mock_patch.return_value = mock_response
 
-    result = update_channel_streams(
-        77,
-        [1, 2, 3],
-        protected_stream_ids={2},
-    )
+    with patch("api_utils._fetch_authoritative_channel_stream_ids", return_value=[1, 2]):
+        result = update_channel_streams(
+            77,
+            [1, 2, 3],
+            protected_stream_ids={2},
+        )
 
     assert result is True
     data = mock_patch.call_args[0][1]

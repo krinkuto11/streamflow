@@ -7,6 +7,18 @@ describe('streamCheckerAPI direct checks', () => {
     vi.restoreAllMocks()
   })
 
+  it('keeps a single-channel check pending beyond the former two-minute limit', async () => {
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ data: { success: true } })
+
+    await streamCheckerAPI.checkSingleChannel(42, 'evening-profile')
+
+    expect(post).toHaveBeenCalledWith(
+      '/stream-checker/check-single-channel',
+      { channel_id: 42, profile_id: 'evening-profile', force_check: true },
+      { timeout: 0 },
+    )
+  })
+
   it('keeps the backend reservation request unbounded while forwarding cancellation', async () => {
     const controller = new AbortController()
     const post = vi.spyOn(api, 'post').mockResolvedValue({ data: { success: true } })

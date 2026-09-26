@@ -367,6 +367,33 @@ class TestSingleChannelProfileRespected(unittest.TestCase):
     @patch('stream_checker_service.StreamCheckConfig')
     @patch('apps.stream.stream_checker_service.get_automation_config_manager')
     @patch('apps.stream.stream_checker_service.get_session_manager')
+    def test_rejected_quality_write_back_fails_single_channel(
+        self, mock_get_session_mgr, mock_get_acm, mock_config_class, mock_get_udi
+    ):
+        profile = _make_profile(matching_enabled=False, checking_enabled=True)
+        service, mock_streams = self._setup_service_with_profile(
+            203, 'Rejected Write Channel', profile,
+            mock_config_class, mock_get_udi, mock_get_acm, mock_get_session_mgr,
+        )
+        service._check_channel.return_value = {
+            'success': False,
+            'error': 'Dispatcharr rejected stream assignment for channel 203',
+        }
+
+        with patch('stream_checker_service.fetch_channel_streams', return_value=mock_streams), \
+             patch('api_utils.refresh_m3u_playlists'), \
+             patch.object(service, '_require_quality_check_connectivity', return_value=None):
+            result = service.check_single_channel(channel_id=203)
+
+        self.assertFalse(result['success'])
+        self.assertIn('Dispatcharr rejected', result['error'])
+        self.assertEqual(result['channel_id'], 203)
+        service._check_channel.assert_called_once()
+
+    @patch('stream_checker_service.get_udi_manager')
+    @patch('stream_checker_service.StreamCheckConfig')
+    @patch('apps.stream.stream_checker_service.get_automation_config_manager')
+    @patch('apps.stream.stream_checker_service.get_session_manager')
     def test_late_abort_during_final_progress_clear_does_not_return_success_or_sync(
         self, mock_get_session_mgr, mock_get_acm, mock_config_class, mock_get_udi
     ):
@@ -1014,8 +1041,37 @@ class TestSingleStreamCheckService(unittest.TestCase):
         probe_kwargs = service._run_capacity_limited_stream_probes.call_args.kwargs
         self.assertTrue(probe_kwargs['blank_check_enabled'])
         self.assertTrue(probe_kwargs['freeze_check_enabled'])
+        self.assertTrue(probe_kwargs['defer_missing_bitrate_retry'])
+        self.assertTrue(probe_kwargs['retry_missing_bitrate'])
         service._run_loop_probes.assert_called_once()
         service._update_stream_stats.assert_called_once()
+
+    @patch('apps.stream.stream_checker_service.get_udi_manager')
+    def test_check_single_stream_passes_disabled_bitrate_retry_to_probe(self, mock_get_udi):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service, mock_udi = self._build_service()
+        mock_get_udi.return_value = mock_udi
+        original_get = service.config.get.side_effect
+        service.config.get.side_effect = lambda key, default=None: (
+            False if key == 'stream_analysis.bitrate_recheck_enabled'
+            else original_get(key, default)
+        )
+        service._run_capacity_limited_stream_probes.return_value = [{
+            'stream_id': 456,
+            'status': 'OK',
+            'bitrate_kbps': None,
+            'measurement_incomplete': True,
+            'measurement_incomplete_reason': 'missing_bitrate',
+            'bitrate_recheck_required': True,
+        }]
+
+        result = StreamCheckerService.check_single_stream(service, 456, persist=False)
+
+        self.assertTrue(result['success'])
+        probe_kwargs = service._run_capacity_limited_stream_probes.call_args.kwargs
+        self.assertFalse(probe_kwargs['defer_missing_bitrate_retry'])
+        self.assertFalse(probe_kwargs['retry_missing_bitrate'])
 
     @patch('apps.stream.stream_checker_service.get_udi_manager')
     def test_check_single_stream_recovers_bitrate_via_capacity_limited_recheck(self, mock_get_udi):

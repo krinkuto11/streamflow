@@ -1,4 +1,4 @@
-export const REGEX_TABLE_GRID_COLS = '32px 60px 48px 2fr 3fr 100px 80px 140px'
+export const REGEX_TABLE_GRID_COLS = '24px minmax(0, 1.4fr) 112px minmax(0, 1fr) 180px'
 
 // M3U account filtering - exclude 'custom' account as it's not a real source
 export const CUSTOM_ACCOUNT_NAME = 'custom'

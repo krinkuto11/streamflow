@@ -7,11 +7,23 @@ from typing import Any, Callable, Dict
 import requests
 from flask import jsonify, send_file
 
+from apps.channels.logo_cache import InvalidLogoResponse, download_and_cache_logo, find_cached_logo
 from apps.channels.service import ChannelQuery
 from apps.core.api_responses import error_response
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
+
+def _send_cached_logo(path: Path):
+    ext = path.suffix
+    mimetype = "image/svg+xml" if ext == ".svg" else f"image/{'jpeg' if ext in ('.jpg', '.jpeg') else ext[1:]}"
+    response = send_file(path, mimetype=mimetype)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    if ext == ".svg":
+        response.headers["Content-Security-Policy"] = (
+            "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'"
+        )
+    return response
 
 
 def get_channels_response(
@@ -149,13 +161,9 @@ def get_channel_logo_cached_response(
             return jsonify({"error": "Invalid logo ID: must be a positive integer"}), 400
 
         logos_cache_dir = config_dir / "logos_cache"
-        logos_cache_dir.mkdir(exist_ok=True)
-
-        logo_filename = f"logo_{logo_id_int}"
-        for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]:
-            cached_path = logos_cache_dir / f"{logo_filename}{ext}"
-            if cached_path.exists():
-                return send_file(cached_path, mimetype=f"image/{ext[1:]}")
+        cached_path = find_cached_logo(logos_cache_dir, logo_id_int)
+        if cached_path is not None:
+            return _send_cached_logo(cached_path)
 
         udi = get_udi_manager()
         logo = udi.get_logo_by_id(logo_id_int)
@@ -173,51 +181,16 @@ def get_channel_logo_cached_response(
         if not logo_url:
             return jsonify({"error": "Logo URL not available"}), 404
 
-        if logo_url.startswith("/"):
-            logo_url = f"{dispatcharr_base_url}{logo_url}"
-
-        if not logo_url.startswith(("http://", "https://")):
-            return jsonify({"error": "Invalid logo URL scheme"}), 400
-
-        logger.debug(f"Downloading logo {logo_id_int} from {logo_url}")
-        response = requests.get(logo_url, timeout=10, verify=True)
-        response.raise_for_status()
-
-        content_type = response.headers.get("content-type", "").lower()
-        ext = ".png"
-        if "jpeg" in content_type or "jpg" in content_type:
-            ext = ".jpg"
-        elif "png" in content_type:
-            ext = ".png"
-        elif "gif" in content_type:
-            ext = ".gif"
-        elif "webp" in content_type:
-            ext = ".webp"
-        elif "svg" in content_type:
-            ext = ".svg"
-        else:
-            if logo_url.lower().endswith(".jpg") or logo_url.lower().endswith(".jpeg"):
-                ext = ".jpg"
-            elif logo_url.lower().endswith(".png"):
-                ext = ".png"
-            elif logo_url.lower().endswith(".gif"):
-                ext = ".gif"
-            elif logo_url.lower().endswith(".webp"):
-                ext = ".webp"
-            elif logo_url.lower().endswith(".svg"):
-                ext = ".svg"
-
-        cached_path = logos_cache_dir / f"{logo_filename}{ext}"
-        with open(cached_path, "wb") as file_obj:
-            file_obj.write(response.content)
+        logger.debug("Downloading logo %s", logo_id_int)
+        cached_path = download_and_cache_logo(logos_cache_dir, logo_id_int, logo_url, dispatcharr_base_url)
 
         logger.debug(f"Cached logo {logo_id} to {cached_path}")
 
-        mimetype = f"image/{ext[1:]}"
-        if ext == ".svg":
-            mimetype = "image/svg+xml"
-        return send_file(cached_path, mimetype=mimetype)
+        return _send_cached_logo(cached_path)
 
+    except InvalidLogoResponse as exc:
+        logger.warning("Rejected logo %s: %s", logo_id, exc)
+        return jsonify({"error": "Logo response was rejected"}), 422
     except requests.exceptions.RequestException as exc:
         logger.error(f"Error downloading logo {logo_id}: {exc}")
         return jsonify({"error": "Failed to download logo"}), 500

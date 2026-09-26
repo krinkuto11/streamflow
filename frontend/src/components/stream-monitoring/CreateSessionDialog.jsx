@@ -96,7 +96,7 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[850px]">
+      <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-[850px]">
         <DialogHeader>
           <DialogTitle>Create Monitoring Session</DialogTitle>
           <DialogDescription>
@@ -186,7 +186,7 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
                   <h4>Advanced Settings</h4>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="stagger" className="text-xs">Stagger (ms)</Label>
                     <Input
@@ -201,7 +201,7 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="sync_interval" className="text-xs">Sync Interval (ms)</Label>
+                    <Label htmlFor="sync_interval" className="text-xs">Enforcement tick (ms)</Label>
                     <Input
                       id="sync_interval"
                       type="number"
@@ -211,9 +211,12 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
                       onChange={(e) => handleChange('enforce_sync_interval_ms', parseInt(e.target.value))}
                       className="h-8 text-sm"
                     />
+                    <p className="text-xs text-muted-foreground">
+                      Checks session order at this interval. Changed order and stream status are written promptly; stable external changes are checked about every 15 seconds.
+                    </p>
                   </div>
 
-                  <div className="space-y-2 col-span-2">
+                  <div className="space-y-2 sm:col-span-2">
                     <Label htmlFor="timeout" className="text-xs">Stream Timeout (ms)</Label>
                     <Input
                       id="timeout"

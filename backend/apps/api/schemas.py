@@ -35,6 +35,20 @@ def _parse_session_type(value: Any) -> str:
     raise ValidationError("session_type must be one of: ffmpeg, openstream")
 
 
+def _parse_session_interval(data: Dict[str, Any], name: str, minimum: int, maximum: int) -> int:
+    """Accept a bounded millisecond interval from a monitoring form or API client."""
+    value = data.get(name, 1000)
+    if isinstance(value, bool):
+        raise ValidationError(f"{name} must be an integer between {minimum} and {maximum}")
+    try:
+        interval = int(value)
+    except (TypeError, ValueError):
+        raise ValidationError(f"{name} must be an integer between {minimum} and {maximum}") from None
+    if not minimum <= interval <= maximum:
+        raise ValidationError(f"{name} must be an integer between {minimum} and {maximum}")
+    return interval
+
+
 def _ensure_non_empty_list(value: Any, *, field_name: str) -> List[Any]:
     if not isinstance(value, list) or len(value) == 0:
         raise ValidationError(f"{field_name} must be a non-empty list")
@@ -417,6 +431,8 @@ class StreamSessionCreateSchema:
     pre_event_minutes: int
     stagger_ms: int
     timeout_ms: int
+    evaluation_interval_ms: int
+    enforce_sync_interval_ms: int
     epg_event: Optional[Dict[str, Any]]
     auto_created: bool
     auto_create_rule_id: Optional[str]
@@ -465,6 +481,8 @@ class StreamSessionCreateSchema:
             pre_event_minutes=pre_event_minutes,
             stagger_ms=stagger_ms,
             timeout_ms=timeout_ms,
+            evaluation_interval_ms=_parse_session_interval(data, "evaluation_interval_ms", 100, 60000),
+            enforce_sync_interval_ms=_parse_session_interval(data, "enforce_sync_interval_ms", 500, 10000),
             epg_event=epg_event,
             auto_created=auto_created,
             auto_create_rule_id=auto_create_rule_id,
@@ -481,6 +499,8 @@ class GroupStreamSessionsCreateSchema:
     pre_event_minutes: int
     stagger_ms: int
     timeout_ms: int
+    evaluation_interval_ms: int
+    enforce_sync_interval_ms: int
     enable_looping_detection: bool
     enable_logo_detection: bool
     session_type: str
@@ -513,6 +533,8 @@ class GroupStreamSessionsCreateSchema:
             pre_event_minutes=pre_event_minutes,
             stagger_ms=stagger_ms,
             timeout_ms=timeout_ms,
+            evaluation_interval_ms=_parse_session_interval(data, "evaluation_interval_ms", 100, 60000),
+            enforce_sync_interval_ms=_parse_session_interval(data, "enforce_sync_interval_ms", 500, 10000),
             enable_looping_detection=_parse_bool(
                 data.get("enable_looping_detection", True), field_name="enable_looping_detection"
             ),

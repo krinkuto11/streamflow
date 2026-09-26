@@ -234,6 +234,23 @@ class UDIFetcher:
 
         return result
 
+    def fetch_channel_ids(self) -> Optional[Set[int]]:
+        """Fetch the channel visibility oracle without fetching stream IDs."""
+        if not self.base_url:
+            logger.warning("fetch_channel_ids: base_url not set")
+            return None
+
+        url = f"{self.base_url}/api/channels/channels/ids/?visibility_filter=all"
+        data = self._fetch_url(url)
+        if not isinstance(data, list):
+            logger.warning("fetch_channel_ids: failed to fetch channel IDs")
+            return None
+        try:
+            return {int(channel_id) for channel_id in data}
+        except (TypeError, ValueError) as exc:
+            logger.warning("fetch_channel_ids: non-integer channel ID: %s", exc)
+            return None
+
     def fetch_entity_counts(self) -> Dict[str, Optional[int]]:
         """Return entity counts derived from fetch_all_ids() (integrity oracle for refresh_all).
 

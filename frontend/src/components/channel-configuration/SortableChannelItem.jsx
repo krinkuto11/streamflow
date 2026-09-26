@@ -47,17 +47,19 @@ export function SortableChannelItem({ channel }) {
     <div
       ref={setNodeRef}
       style={style}
-      className={`flex items-center gap-3 p-4 bg-card border rounded-lg ${isDragging ? 'shadow-lg' : 'shadow-sm'}`}
+      className={`flex min-w-0 items-center gap-2 p-3 bg-card border rounded-lg ${isDragging ? 'shadow-lg' : 'shadow-sm'}`}
     >
-      <div
+      <button
+        type="button"
+        aria-label={`Reorder ${channel.name}`}
         {...attributes}
         {...listeners}
-        className="cursor-grab active:cursor-grabbing touch-none"
+        className="flex h-11 w-8 shrink-0 items-center justify-center rounded cursor-grab active:cursor-grabbing touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <GripVertical className="h-5 w-5 text-muted-foreground" />
-      </div>
+      </button>
 
-      <div className="w-20 h-10 flex-shrink-0 bg-muted rounded-md flex items-center justify-center overflow-hidden">
+      <div className="w-9 h-9 flex-shrink-0 bg-muted rounded-md flex items-center justify-center overflow-hidden">
         {logoUrl && !logoError ? (
           <img
             src={logoUrl}
@@ -72,8 +74,8 @@ export function SortableChannelItem({ channel }) {
         )}
       </div>
 
-      <div className="flex-1 flex items-center gap-4">
-        <Badge variant="outline" className="font-mono">
+      <div className="min-w-0 flex-1 flex items-center gap-2">
+        <Badge variant="outline" className="shrink-0 font-mono text-xs">
           #{channel.channel_number || 'N/A'}
         </Badge>
         <div className="flex-1 min-w-0">

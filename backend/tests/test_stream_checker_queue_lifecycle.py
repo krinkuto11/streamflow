@@ -3118,6 +3118,61 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(sync_counts, [(2, 1, 0, 4, 1, 0, 1), (3, 1, 2, 7, 1, 1, 2)])
         self.assertFalse(service.sync_batch_state['active'])
 
+    def test_sync_batch_counts_rejected_channel_write_as_failed(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._sync_batch_generation = 0
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service.update_tracker = Mock()
+        service.config = Mock()
+        service.config.get.side_effect = (
+            lambda key, default=None: True
+            if key == 'concurrent_streams.enabled' else default
+        )
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._check_channel_concurrent = Mock(return_value={
+            'success': False,
+            'error': 'Dispatcharr rejected stream assignment for channel 101',
+        })
+        udi = Mock()
+        udi.get_channel_by_id.return_value = {'streams': [{'id': 1}]}
+
+        with patch('apps.udi.get_udi_manager', return_value=udi):
+            result = service.check_channels_synchronously([101])
+
+        self.assertFalse(result[101]['success'])
+        self.assertEqual(service.sync_batch_state['failed'], 1)
+        self.assertEqual(service.sync_batch_state['completed'], 0)
+
+    def test_sync_batch_skips_channel_owned_by_monitoring_before_probes(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._sync_batch_generation = 0
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service.update_tracker = Mock()
+        service.config = Mock()
+        service.config.get.return_value = True
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._check_channel_concurrent = Mock()
+        udi = Mock()
+        udi.get_channel_by_id.return_value = {'streams': [1]}
+        monitoring = Mock()
+        monitoring.is_channel_in_active_session.return_value = True
+
+        with patch('apps.udi.get_udi_manager', return_value=udi), \
+             patch('apps.stream.stream_checker_service.get_session_manager', return_value=monitoring):
+            result = service.check_channels_synchronously([101])
+
+        self.assertTrue(result[101]['skipped'])
+        self.assertEqual(result[101]['reason'], 'in_monitoring_session')
+        service._check_channel_concurrent.assert_not_called()
+
     def test_sync_batch_rejects_active_direct_stream_reservation(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.check_queue = StreamCheckQueue(max_size=10)

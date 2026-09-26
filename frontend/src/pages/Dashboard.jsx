@@ -66,6 +66,7 @@ const AUTOMATION_STAGES = [
 ]
 
 const LIVE_STATUS_POLL_MS = 1000
+const IDLE_STATUS_POLL_MS = 5000
 const BACKGROUND_DATA_POLL_MS = 30000
 
 const formatDuration = (seconds) => {
@@ -131,6 +132,8 @@ export default function Dashboard() {
   const [udiSyncing, setUdiSyncing] = useState(false)
   const [dashboardNow, setDashboardNow] = useState(() => Date.now())
   const statusPollInFlight = useRef(false)
+  const liveContextInFlight = useRef(false)
+  const activeRunRef = useRef(false)
   // debug_mode gates the fault injection panel (Phase 5 — not yet built)
   const [debugMode, setDebugMode] = useState(false)
   const { toast } = useToast()
@@ -138,25 +141,53 @@ export default function Dashboard() {
   useEffect(() => {
     setDashboardNow(Date.now())
     loadStatus()
+    loadSecondaryStatus()
+    loadLiveContext()
     loadPlaylists()
     loadPeriods()
     loadEnvironment()
     loadUdiStats()
 
-    const statusInterval = setInterval(() => {
+    let statusTimer
+    let stopped = false
+    const scheduleStatus = (delayMs = activeRunRef.current ? LIVE_STATUS_POLL_MS : IDLE_STATUS_POLL_MS) => {
+      if (stopped) return
+      statusTimer = setTimeout(async () => {
+        if (document.visibilityState === 'visible') {
+          setDashboardNow(Date.now())
+          await loadStatus()
+        }
+        scheduleStatus()
+      }, delayMs)
+    }
+    scheduleStatus(LIVE_STATUS_POLL_MS)
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return
       setDashboardNow(Date.now())
       loadStatus()
-    }, LIVE_STATUS_POLL_MS)
+      loadSecondaryStatus()
+      loadLiveContext()
+      loadUdiStats()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
 
     const backgroundInterval = setInterval(() => {
-      loadStatus()
+      if (document.visibilityState !== 'visible') return
+      loadSecondaryStatus()
       loadPlaylists()
       loadUdiStats()
     }, BACKGROUND_DATA_POLL_MS)
+    const liveContextInterval = setInterval(() => {
+      if (document.visibilityState === 'visible') loadLiveContext()
+    }, 5000)
 
     return () => {
-      clearInterval(statusInterval)
+      stopped = true
+      clearTimeout(statusTimer)
       clearInterval(backgroundInterval)
+      clearInterval(liveContextInterval)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   }, [])
 
@@ -166,12 +197,9 @@ export default function Dashboard() {
     }
     statusPollInFlight.current = true
     try {
-      const [automationResult, streamCheckerResult, automationConfigResult, shadowMonitorResult, viewerActivityResult] = await Promise.allSettled([
+      const [automationResult, streamCheckerResult] = await Promise.allSettled([
         automationAPI.getStatus(),
         streamCheckerAPI.getStatus(),
-        automationAPI.getConfig(),
-        shadowBlankMonitorAPI.getStatus(),
-        viewerActivityAPI.getStatus(),
       ])
 
       if (automationResult.status === 'fulfilled') {
@@ -180,22 +208,22 @@ export default function Dashboard() {
       if (streamCheckerResult.status === 'fulfilled') {
         setStreamCheckerStatus(streamCheckerResult.value.data)
       }
-      if (automationConfigResult.status === 'fulfilled') {
-        setAutomationConfig(automationConfigResult.value.data || {})
-      }
-      if (shadowMonitorResult.status === 'fulfilled') {
-        setShadowMonitorStatus(shadowMonitorResult.value.data)
-      }
-      if (viewerActivityResult.status === 'fulfilled') {
-        setViewerActivityStatus(viewerActivityResult.value.data)
+      const automation = automationResult.status === 'fulfilled' ? automationResult.value.data : null
+      const checker = streamCheckerResult.status === 'fulfilled' ? streamCheckerResult.value.data : null
+      const activeNow = Boolean(
+          ['running', 'queued'].includes(automation?.run_status?.state)
+          || automation?.run_status?.active
+          || checker?.checking || checker?.stream_checking_mode
+          || Number(checker?.queue?.in_progress || 0) > 0
+          || Number(checker?.queue?.queue_size || 0) > 0
+        )
+      if (activeNow || (automation && checker)) {
+        activeRunRef.current = activeNow
       }
 
       const failedResults = [
         automationResult,
         streamCheckerResult,
-        automationConfigResult,
-        shadowMonitorResult,
-        viewerActivityResult,
       ].filter(result => result.status === 'rejected')
 
       if (failedResults.length > 0) {
@@ -209,6 +237,30 @@ export default function Dashboard() {
     } finally {
       statusPollInFlight.current = false
       setLoading(false)
+    }
+  }
+
+  const loadSecondaryStatus = async () => {
+    try {
+      const response = await automationAPI.getConfig()
+      setAutomationConfig(response.data || {})
+    } catch (error) {
+      console.warn('Failed to load automation configuration:', error)
+    }
+  }
+
+  const loadLiveContext = async () => {
+    if (liveContextInFlight.current) return
+    liveContextInFlight.current = true
+    try {
+      const [shadowResult, viewersResult] = await Promise.allSettled([
+        shadowBlankMonitorAPI.getStatus(),
+        viewerActivityAPI.getStatus(),
+      ])
+      if (shadowResult.status === 'fulfilled') setShadowMonitorStatus(shadowResult.value.data)
+      if (viewersResult.status === 'fulfilled') setViewerActivityStatus(viewersResult.value.data)
+    } finally {
+      liveContextInFlight.current = false
     }
   }
 
@@ -464,6 +516,7 @@ export default function Dashboard() {
 
       await automationAPI.updateConfig({ enabled_m3u_accounts: newEnabledAccounts })
       toast({ title: "Success", description: `Playlist ${currentlyEnabled ? 'disabled' : 'enabled'} successfully` })
+      await loadSecondaryStatus()
       await loadStatus()
       await loadPlaylists()
     } catch (err) {
@@ -481,7 +534,7 @@ export default function Dashboard() {
     )
   }
 
-  const isAutomationRunning = status?.running || false
+  const schedulerRunning = status?.running || false
   const runStatus = status?.run_status || {}
   const schedulerRetry = runStatus?.scheduler_retry || status?.scheduler_retry || {}
   const schedulerRetryPeriods = Array.isArray(schedulerRetry?.periods)
@@ -740,15 +793,15 @@ export default function Dashboard() {
     return <StreamFlowInitializingScreen initialization={udiInitialization} />
   }
 
-  const runBadgeClass = failedRun
+  const runBadgeClass = displayRunningRun
+    ? 'bg-blue-600 text-white border-transparent'
+    : failedRun
     ? 'bg-destructive text-destructive-foreground border-transparent'
     : abortedRun
       ? 'bg-amber-600 text-white border-transparent'
       : completedRun
       ? 'bg-green-600 text-white border-transparent'
-      : displayRunningRun
-        ? 'bg-blue-600 text-white border-transparent'
-        : ''
+      : ''
   const actionStates = getDashboardActionStates({
     actionLoading,
     isStreamCheckerProcessing: isProcessing,
@@ -765,6 +818,8 @@ export default function Dashboard() {
   const totalWatcherClients = viewerActivityStatus?.total_watcher_clients || 0
   const visibleViewerChannels = viewerChannels.slice(0, 6)
   const hiddenViewerChannelCount = Math.max(0, viewerChannels.length - visibleViewerChannels.length)
+  const latestRecordedRun = runHistoryBaseline.latest
+  const overviewMetrics = displayRunMetrics.filter(metric => ['checked', 'good', 'dead', 'hidden'].includes(metric.key))
 
   const syncBadgeClass =
     syncStatus === 'completed' ? 'bg-green-600 text-white border-transparent' :
@@ -773,19 +828,88 @@ export default function Dashboard() {
     ''
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
-        <p className="text-muted-foreground">Monitor and control your stream automation</p>
+    <div className="min-w-0 space-y-5">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="mb-2 text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Overview</div>
+          <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Checks, playback and your next scheduled run.</p>
+        </div>
+        <div className="flex flex-col gap-2 sm:max-w-sm sm:items-end">
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" className="min-h-11" asChild><Link to="/channels">Channels</Link></Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  disabled={actionStates.runAutomation.disabled}
+                  className="min-h-11"
+                  aria-describedby={actionStates.runAutomation.reason ? 'run-automation-disabled-reason' : undefined}
+                  title={actionStates.runAutomation.reason || 'Run automation for all periods or choose a specific period'}
+                >
+                  {actionLoading === 'automation' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlayCircle className="mr-2 h-4 w-4" />}
+                  {actionLoading === 'automation' ? 'Starting...' : 'Run automation'}
+                  <ChevronDown className="ml-2 h-4 w-4 opacity-60" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="max-h-80 w-64 max-w-[calc(100vw-2rem)] overflow-y-auto">
+                <DropdownMenuLabel>Choose run mode</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem className="min-h-11" onClick={() => handleRunAutomation(null)}>Run all periods</DropdownMenuItem>
+                {periods.length > 0 && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="text-xs text-muted-foreground">Specific periods</DropdownMenuLabel>
+                    {periods.map(period => (
+                      <DropdownMenuItem className="min-h-11 break-words" key={period.id} onClick={() => handleRunAutomation(period.id)}>
+                        {period.name}
+                      </DropdownMenuItem>
+                    ))}
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+          {actionStates.runAutomation.reason && (
+            <p id="run-automation-disabled-reason" className="text-xs text-muted-foreground">{actionStates.runAutomation.reason}</p>
+          )}
+        </div>
       </div>
 
+      {!showAutomationRunCard && (
+        <Card className="border-primary/20">
+          <CardContent className="space-y-4 p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Current activity</p>
+                <h2 className="mt-1 text-xl font-semibold">{status && streamCheckerStatus ? 'No check running' : 'Status unavailable'}</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {status && streamCheckerStatus ? 'Start a run above or let your scheduled periods take care of it.' : 'Waiting for current automation and checker status.'}
+                </p>
+              </div>
+              <Badge variant="secondary" className="shrink-0 gap-1.5"><Clock3 className="h-3.5 w-3.5" />{status && streamCheckerStatus ? 'Idle' : 'Unknown'}</Badge>
+            </div>
+            <div className="flex flex-col gap-2 border-t pt-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0 text-sm">
+                <span className="font-medium">Last recorded run</span>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {latestRecordedRun
+                    ? `${latestRecordedRun.timestamp ? new Date(latestRecordedRun.timestamp).toLocaleString() : 'Time unavailable'} · ${formatDuration(latestRecordedRun.duration_seconds)} · ${latestRecordedRun.total_channels ?? 0} channels`
+                    : 'No automation run history available yet.'}
+                </p>
+              </div>
+              <Button variant="ghost" className="min-h-11 self-start sm:self-auto" asChild><Link to="/changelog"><History className="mr-2 h-4 w-4" />View history</Link></Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {showAutomationRunCard && (
-        <Card>
+        <Card className={failedRun && !displayRunningRun ? 'border-destructive/50' : 'border-primary/20'}>
           <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="space-y-1">
               <CardTitle className="flex items-center gap-2 text-lg">
                 <ListChecks className="h-5 w-5 text-muted-foreground" />
-                Automation Run
+                {displayRunningRun ? 'Check in progress' : queuedRun ? 'Automation queued' : 'Latest run'}
               </CardTitle>
               <CardDescription>{displayRunMessage}</CardDescription>
             </div>
@@ -794,7 +918,7 @@ export default function Dashboard() {
                 <Button
                   type="button"
                   variant="destructive"
-                  size="sm"
+                  className="min-h-11"
                   onClick={handleStopActiveRun}
                   disabled={actionLoading === 'stop-run'}
                   title="Stop the active automation or stream-check run"
@@ -809,61 +933,18 @@ export default function Dashboard() {
               )}
               <Badge variant="outline" className={`w-fit gap-1 ${runBadgeClass}`}>
                 {displayRunningRun && <Loader2 className="h-3 w-3 animate-spin" />}
-                {failedRun && <AlertCircle className="h-3 w-3" />}
-                {abortedRun && <AlertCircle className="h-3 w-3" />}
-                {completedRun && <CheckCircle2 className="h-3 w-3" />}
+                {!displayRunningRun && failedRun && <AlertCircle className="h-3 w-3" />}
+                {!displayRunningRun && abortedRun && <AlertCircle className="h-3 w-3" />}
+                {!displayRunningRun && completedRun && <CheckCircle2 className="h-3 w-3" />}
                 {runDisplayBadgeLabel}
               </Badge>
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-              <div className="rounded-md border bg-muted/30 p-3">
-                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                  <Activity className="h-3.5 w-3.5" />
-                  Current Stage
-                </div>
-                <div className="mt-1 truncate text-lg font-semibold">{runDisplayStageLabel}</div>
-              </div>
-              <div className="rounded-md border bg-muted/30 p-3">
-                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                  <Clock3 className="h-3.5 w-3.5" />
-                  Updated
-                </div>
-                <div className="mt-1 text-lg font-semibold">{formatTime(displayRunUpdatedAt)}</div>
-              </div>
-              <div className="rounded-md border bg-muted/30 p-3">
-                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                  <Timer className="h-3.5 w-3.5" />
-                  Duration
-                </div>
-                <div className="mt-1 text-lg font-semibold">{formatDuration(displayRunElapsedSeconds)}</div>
-              </div>
-              <div className="rounded-md border bg-muted/30 p-3">
-                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                  <Timer className="h-3.5 w-3.5" />
-                  Stage Time
-                </div>
-                <div className="mt-1 text-lg font-semibold">{formatDuration(displayRunStageElapsedSeconds)}</div>
-              </div>
-              <div className="rounded-md border bg-muted/30 p-3">
-                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                  <Activity className="h-3.5 w-3.5" />
-                  Progress
-                </div>
-                <div className="mt-1 text-lg font-semibold">{Math.round(runProgressPercent)}%</div>
-              </div>
-              <div className="rounded-md border bg-muted/30 p-3">
-                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                  <Database className="h-3.5 w-3.5" />
-                  API p95 / p99
-                </div>
-                <div className="mt-1 text-lg font-semibold">
-                  {apiTiming.p95_seconds != null ? formatLatency(apiTiming.p95_seconds) : 'N/A'}
-                  <span className="mx-1 text-muted-foreground">/</span>
-                  {apiTiming.p99_seconds != null ? formatLatency(apiTiming.p99_seconds) : 'N/A'}
-                </div>
-              </div>
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+              <span className="font-semibold">{runDisplayStageLabel}</span>
+              <span className="flex items-center gap-1.5 text-muted-foreground"><Timer className="h-4 w-4" />{formatDuration(displayRunElapsedSeconds)} elapsed</span>
+              <span className="text-xs text-muted-foreground">Updated {formatTime(displayRunUpdatedAt)}</span>
             </div>
 
             <div>
@@ -886,7 +967,7 @@ export default function Dashboard() {
 
             {schedulerRetryPeriods.length > 0 && (
               <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-sm">
-                <div className="flex items-center gap-2 font-medium text-amber-200">
+                <div className="flex items-center gap-2 font-medium text-amber-800 dark:text-amber-200">
                   <Clock3 className="h-4 w-4" />
                   Quality retry status
                 </div>
@@ -908,7 +989,23 @@ export default function Dashboard() {
               </div>
             )}
 
-            <div className="grid gap-2 md:grid-cols-4 lg:grid-cols-8">
+            <div className="grid grid-cols-2 gap-3 border-t pt-4 sm:grid-cols-4">
+              {overviewMetrics.map(metric => (
+                <div key={metric.key} className="min-w-0" title={metric.description}>
+                  <div className="text-xs text-muted-foreground">{metric.label}</div>
+                  <div className="mt-1 text-xl font-semibold tabular-nums">{metric.value === null ? 'N/A' : metric.value}</div>
+                </div>
+              ))}
+            </div>
+
+            <details className="rounded-lg border bg-muted/20 p-3">
+              <summary className="cursor-pointer text-sm font-semibold marker:text-primary">Stages and performance details</summary>
+              <div className="mt-4 space-y-3">
+                <div className="flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted-foreground">
+                  <span>Stage time: {formatDuration(displayRunStageElapsedSeconds)}</span>
+                  <span>API p95 / p99: {apiTiming.p95_seconds != null ? formatLatency(apiTiming.p95_seconds) : 'N/A'} / {apiTiming.p99_seconds != null ? formatLatency(apiTiming.p99_seconds) : 'N/A'}</span>
+                </div>
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
               {displayStageCards.map((stage) => {
                 const isCurrent = stage.id === displayRunStageId && stage.status === 'running'
                 const isDone = stage.status === 'completed'
@@ -961,131 +1058,51 @@ export default function Dashboard() {
                 </div>
               ))}
             </div>
+              </div>
+            </details>
           </CardContent>
         </Card>
       )}
 
-      {/* Status Cards */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Automation Status</CardTitle>
-            <Activity className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-2">
-              {isAutomationRunning ? (
-                <Badge variant="default" className="bg-green-500">
-                  <CheckCircle2 className="h-3 w-3 mr-1" />Running
-                </Badge>
-              ) : (
-                <Badge variant="secondary">Stopped</Badge>
-              )}
-            </div>
-            <p className="text-xs text-muted-foreground mt-2">Background automation service</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Stream Checker</CardTitle>
-            <Activity className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-2">
-              {streamCheckerStatus?.checking || (streamCheckerStatus?.queue?.in_progress > 0) ? (
-                <Badge variant="default" className="bg-green-500">
-                  <CheckCircle2 className="h-3 w-3 mr-1" />Normal Check
-                </Badge>
-              ) : (
-                <Badge variant="secondary">Idle</Badge>
-              )}
-            </div>
-            <p className="text-xs text-muted-foreground mt-2">Quality checking service</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Shadow Monitor</CardTitle>
-            <Eye className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="flex flex-wrap items-center gap-2">
-              {shadowMonitorStatus?.running ? (
-                <Badge variant="default" className="bg-green-500">
-                  <CheckCircle2 className="h-3 w-3 mr-1" />Watching
-                </Badge>
-              ) : shadowMonitorStatus?.enabled ? (
-                <Badge variant="outline">Enabled</Badge>
-              ) : (
-                <Badge variant="secondary">Disabled</Badge>
-              )}
-              {shadowMonitorStatus?.dry_run && <Badge variant="outline">Dry Run</Badge>}
-            </div>
-            <p className="text-xs text-muted-foreground mt-2">
-              <Link to="/shadow-monitor" className="hover:underline">
-                {shadowWatchedCount} active channels
-                {shadowLastEvent ? `, last ${formatShadowEvent(shadowLastEvent.type)}` : ''}
-              </Link>
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Last Update</CardTitle>
-            <RefreshCw className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {status?.last_playlist_update
-                ? new Date(status.last_playlist_update).toLocaleTimeString()
-                : 'N/A'}
-            </div>
-            <p className="text-xs text-muted-foreground">Most recent activity</p>
-          </CardContent>
-        </Card>
+      {/* Background services are separate from the actual check state above. */}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 px-1 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1.5"><Activity className="h-3.5 w-3.5" />Scheduler: <span className="font-medium text-foreground">{status ? (schedulerRunning ? 'Active' : 'Stopped') : 'Unknown'}</span></span>
+        <Link to="/shadow-monitor" className="flex flex-wrap items-center gap-1.5 rounded-sm hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <Eye className="h-3.5 w-3.5" />Shadow monitor:
+          <span className="font-medium text-foreground">{!shadowMonitorStatus ? 'Unknown' : shadowMonitorStatus.running ? `Watching ${shadowWatchedCount} channels` : shadowMonitorStatus.enabled ? 'Enabled' : 'Disabled'}</span>
+          {shadowMonitorStatus?.dry_run && <span>(dry run)</span>}
+        </Link>
+        {status?.last_playlist_update && <span>Playlist update: {new Date(status.last_playlist_update).toLocaleString()}</span>}
       </div>
 
-      <Card>
-        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-1">
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <Users className="h-5 w-5 text-muted-foreground" />
-              Watched Channels
-            </CardTitle>
-            <CardDescription>Current viewer and watcher playback</CardDescription>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Badge variant={realWatchedCount > 0 ? 'default' : 'secondary'}>
-              {formatRealViewerChannelCount(realWatchedCount)}
-            </Badge>
-            <Badge variant={watcherOnlyCount > 0 ? 'outline' : 'secondary'}>
-              {formatWatcherOnlyChannelCount(watcherOnlyCount)}
-            </Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-3">
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="text-xs font-medium uppercase text-muted-foreground">Viewer Clients</div>
-              <div className="mt-1 text-2xl font-semibold">{totalRealClients}</div>
-            </div>
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="text-xs font-medium uppercase text-muted-foreground">Watcher Clients</div>
-              <div className="mt-1 text-2xl font-semibold">{totalWatcherClients}</div>
-            </div>
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="text-xs font-medium uppercase text-muted-foreground">Active Channels</div>
-              <div className="mt-1 text-2xl font-semibold">{viewerChannels.length}</div>
-            </div>
-          </div>
+      {syncStatus === 'failed' && (
+        <Alert variant="destructive">
+          <WifiOff className="h-4 w-4" />
+          <AlertDescription>Dispatcharr cache refresh failed. Open System and maintenance below to retry or review the connection in Settings.</AlertDescription>
+        </Alert>
+      )}
 
-          {viewerChannels.length === 0 ? (
-            <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
-              No active channel playback detected
+      <UpcomingAutomationEvents />
+
+      <Card>
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0 pb-3">
+          <CardTitle className="flex items-center gap-2 text-base"><Users className="h-4 w-4 text-muted-foreground" />Live playback</CardTitle>
+          <Button variant="ghost" className="min-h-11" asChild><Link to="/stream-monitoring">Monitoring</Link></Button>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
+            <span><strong className="tabular-nums">{viewerActivityStatus ? totalRealClients : 'N/A'}</strong> <span className="text-muted-foreground">viewer clients</span></span>
+            <span><strong className="tabular-nums">{viewerActivityStatus ? totalWatcherClients : 'N/A'}</strong> <span className="text-muted-foreground">watcher clients</span></span>
+            <span><strong className="tabular-nums">{viewerActivityStatus ? viewerChannels.length : 'N/A'}</strong> <span className="text-muted-foreground">active channels</span></span>
+          </div>
+          {viewerChannels.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="secondary">{formatRealViewerChannelCount(realWatchedCount)}</Badge>
+              <Badge variant="outline">{formatWatcherOnlyChannelCount(watcherOnlyCount)}</Badge>
             </div>
+          )}
+          {viewerChannels.length === 0 ? (
+            <p className="text-sm text-muted-foreground">{viewerActivityStatus ? 'No active channel playback detected.' : 'Viewer activity is unavailable.'}</p>
           ) : (
             <div className="grid gap-2 lg:grid-cols-2 xl:grid-cols-3">
               {visibleViewerChannels.map((channel) => (
@@ -1133,11 +1150,14 @@ export default function Dashboard() {
         </CardContent>
       </Card>
 
-      {/* Quick Actions */}
+      {/* System Information */}
+      <details className="rounded-xl border bg-card p-4">
+        <summary className="cursor-pointer py-1 text-sm font-semibold marker:text-primary">System and maintenance</summary>
+        <div className="mt-4 space-y-4">
       <Card>
         <CardHeader>
-          <CardTitle>Quick Actions</CardTitle>
-          <CardDescription>Perform common operations on your stream management system</CardDescription>
+          <CardTitle className="text-base">Dispatcharr cache</CardTitle>
+          <CardDescription>Refresh the cached channel, stream and playlist data.</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="flex flex-col sm:flex-row gap-6">
@@ -1156,7 +1176,7 @@ export default function Dashboard() {
                   <Badge variant="outline" className={`text-xs ${syncBadgeClass}`}>
                     {syncStatus === 'completed' && <CheckCircle2 className="h-3 w-3 mr-1" />}
                     {syncStatus === 'failed'    && <WifiOff      className="h-3 w-3 mr-1" />}
-                    {syncStatus === 'completed' ? 'Synced' : 'Failed'}
+                    {syncStatus === 'completed' ? 'Synced' : syncStatus === 'failed' ? 'Failed' : syncStatus === 'idle' ? 'Idle' : 'Unknown'}
                   </Badge>
                 ) : null}
               </div>
@@ -1209,7 +1229,8 @@ export default function Dashboard() {
               <Button
                 onClick={handleReloadUDI}
                 disabled={actionStates.reloadUdi.disabled}
-                className="w-full"
+                variant="outline"
+                className="min-h-11 w-full"
                 title={actionStates.reloadUdi.reason || 'Reload Dispatcharr cache'}
               >
                 {udiRefreshing
@@ -1218,55 +1239,18 @@ export default function Dashboard() {
                 {udiRefreshing ? 'Syncing...' : 'Reload UDI'}
               </Button>
 
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    disabled={actionStates.runAutomation.disabled}
-                    variant="outline"
-                    className="w-full"
-                    aria-describedby={actionStates.runAutomation.reason ? 'run-automation-disabled-reason' : undefined}
-                    title={actionStates.runAutomation.reason || 'Run automation'}
-                  >
-                    <PlayCircle className="mr-2 h-4 w-4" />
-                    {actionLoading === 'automation' ? 'Running...' : 'Run Automation'}
-                    <ChevronDown className="ml-2 h-4 w-4 opacity-50" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-[200px]">
-                  <DropdownMenuLabel>Choose Run Mode</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={() => handleRunAutomation(null)}>Run All Periods</DropdownMenuItem>
-                  {periods.length > 0 && (
-                    <>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuLabel className="text-[10px] uppercase text-muted-foreground">
-                        Specific Periods
-                      </DropdownMenuLabel>
-                      {periods.map(period => (
-                        <DropdownMenuItem key={period.id} onClick={() => handleRunAutomation(period.id)}>
-                          {period.name}
-                        </DropdownMenuItem>
-                      ))}
-                    </>
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
-              {actionStates.runAutomation.reason && (
-                <p id="run-automation-disabled-reason" className="text-xs text-muted-foreground">
-                  {actionStates.runAutomation.reason}
-                </p>
-              )}
             </div>
           </div>
         </CardContent>
       </Card>
 
-      {/* System Information */}
+
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <Card>
           <CardHeader><CardTitle>Automation Configuration</CardTitle></CardHeader>
           <CardContent>
             <dl className="space-y-3 text-sm">
+              {shadowLastEvent && <div className="flex flex-wrap justify-between gap-2"><dt className="text-muted-foreground">Last shadow event:</dt><dd>{formatShadowEvent(shadowLastEvent.type)}</dd></div>}
               <div className="flex justify-between items-center">
                 <dt className="text-muted-foreground">Active Profiles:</dt>
                 <dd><Badge variant="secondary">{status?.profiles_count || 0}</Badge></dd>
@@ -1365,11 +1349,13 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       </div>
-
-      {/* Upcoming Automation Events */}
-      <UpcomingAutomationEvents />
+        </div>
+      </details>
 
       {/* Available Playlists */}
+      <details className="rounded-xl border bg-card p-4">
+        <summary className="cursor-pointer text-sm font-semibold marker:text-primary">Global playlist visibility</summary>
+        <div className="mt-4">
       <Card>
         <CardHeader>
           <CardTitle>Global Playlist Visibility</CardTitle>
@@ -1386,9 +1372,9 @@ export default function Dashboard() {
                 const playlistId = Number(playlist.id)
                 const isEnabled = enabledAccounts.length === 0 || enabledAccounts.includes(playlistId)
                 return (
-                  <div key={playlist.id} className="flex items-center justify-between p-3 border rounded-lg">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
+                  <div key={playlist.id} className="flex min-w-0 items-center justify-between gap-3 rounded-lg border p-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
                         <h4 className="font-medium">{playlist.name}</h4>
                         <Badge variant={isEnabled ? "default" : "secondary"}>
                           {isEnabled ? "Enabled" : "Disabled"}
@@ -1399,6 +1385,7 @@ export default function Dashboard() {
                       )}
                     </div>
                     <Switch
+                      aria-label={`Include ${playlist.name} in automation`}
                       checked={isEnabled}
                       onCheckedChange={() => handleTogglePlaylist(playlist.id, isEnabled)}
                       disabled={togglingPlaylist === playlist.id}
@@ -1410,6 +1397,8 @@ export default function Dashboard() {
           )}
         </CardContent>
       </Card>
+        </div>
+      </details>
     </div>
   )
 }

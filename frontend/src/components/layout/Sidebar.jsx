@@ -1,228 +1,249 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { Link, useLocation } from 'react-router-dom'
-import { cn } from '@/lib/utils.js'
 import {
-  LayoutDashboard,
-  CheckCircle,
-  Settings,
-  ListChecks,
-  History,
-  Menu,
-  X,
-  Calendar,
-  CalendarCheck,
-  Activity,
-  Eye,
-  ChevronLeft,
-  ChevronRight,
-  TrendingUp,
-  CircleHelp
+  Activity, Calendar, CalendarCheck, CheckCircle, ChevronLeft, ChevronRight,
+  CircleHelp, Eye, History, LayoutDashboard, ListChecks, Menu, Settings,
+  TrendingUp, X,
 } from 'lucide-react'
+import { cn } from '@/lib/utils.js'
 import { Button } from '@/components/ui/button.jsx'
 import { ThemeToggle } from '@/components/ThemeToggle.jsx'
 import { versionAPI, environmentAPI } from '@/services/api.js'
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
+  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
+} from '@/components/ui/tooltip'
 
-const menuItems = [
-  { text: 'Dashboard', icon: LayoutDashboard, path: '/' },
-  { text: 'Stream Checker', icon: CheckCircle, path: '/stream-checker' },
-  { text: 'Stream Monitoring', icon: Activity, path: '/stream-monitoring' },
-  { text: 'Shadow Monitor', icon: Eye, path: '/shadow-monitor' },
-  { text: 'Teamarr Preflight', icon: CalendarCheck, path: '/teamarr-preflight' },
-  { text: 'Channel Configuration', icon: ListChecks, path: '/channels' },
-  { text: 'Scheduling', icon: Calendar, path: '/scheduling' },
-  { text: 'Analytics', icon: TrendingUp, path: '/stats' },
-  { text: 'Settings', icon: Settings, path: '/settings' },
-  { text: 'Help', icon: CircleHelp, path: '/help' },
-  { text: 'Changelog', icon: History, path: '/changelog' },
+const navigationGroups = [
+  {
+    label: 'Workspace',
+    items: [
+      { text: 'Dashboard', icon: LayoutDashboard, path: '/' },
+      { text: 'Channels', icon: ListChecks, path: '/channels' },
+      { text: 'Monitoring', icon: Activity, path: '/stream-monitoring' },
+    ],
+  },
+  {
+    label: 'Operations',
+    items: [
+      { text: 'Stream Checker', icon: CheckCircle, path: '/stream-checker' },
+      { text: 'Shadow Monitor', icon: Eye, path: '/shadow-monitor' },
+      { text: 'Teamarr Preflight', icon: CalendarCheck, path: '/teamarr-preflight' },
+      { text: 'Scheduling', icon: Calendar, path: '/scheduling' },
+      { text: 'Analytics', icon: TrendingUp, path: '/stats' },
+      { text: 'Changelog', icon: History, path: '/changelog' },
+    ],
+  },
+  {
+    label: 'System',
+    items: [
+      { text: 'Settings', icon: Settings, path: '/settings' },
+      { text: 'Help', icon: CircleHelp, path: '/help' },
+    ],
+  },
 ]
+const primaryNavigation = navigationGroups[0].items
+const allNavigation = navigationGroups.flatMap(group => group.items)
+
+export function getNavigationItem(pathname) {
+  if (pathname === '/dashboard') return allNavigation[0]
+  if (pathname.startsWith('/automation/profiles/')) return allNavigation.find(item => item.path === '/settings')
+  return allNavigation.find(item => pathname === item.path || (item.path !== '/' && pathname.startsWith(item.path + '/'))) || allNavigation[0]
+}
 
 export function Sidebar({ isCollapsed, setIsCollapsed, navigationDisabled = false }) {
   const [isOpen, setIsOpen] = useState(false)
   const [version, setVersion] = useState(null)
   const [publicIp, setPublicIp] = useState(null)
+  const navigationOpener = useRef(null)
   const location = useLocation()
+  const currentItem = getNavigationItem(location.pathname)
 
   useEffect(() => {
-    const fetchVersion = async () => {
-      try {
-        const response = await versionAPI.getVersion()
-        setVersion(response.data.version)
-      } catch (error) {
+    setIsOpen(false)
+  }, [location.pathname])
+
+  useEffect(() => {
+    versionAPI.getVersion()
+      .then(response => setVersion(response.data.version))
+      .catch(error => {
         console.error('Failed to fetch version:', error)
         setVersion('dev-unknown')
-      }
-    }
-    fetchVersion()
+      })
+    environmentAPI.getEnvironment()
+      .then(response => setPublicIp(response.data.public_ip))
+      .catch(error => console.error('Failed to fetch environment:', error))
   }, [])
 
   useEffect(() => {
-    const fetchEnvironment = async () => {
-      try {
-        const response = await environmentAPI.getEnvironment()
-        setPublicIp(response.data.public_ip)
-      } catch (error) {
-        console.error('Failed to fetch environment:', error)
-      }
-    }
-    fetchEnvironment()
+    const desktop = window.matchMedia('(min-width: 1024px)')
+    const closeOnDesktop = () => { if (desktop.matches) setIsOpen(false) }
+    desktop.addEventListener('change', closeOnDesktop)
+    return () => desktop.removeEventListener('change', closeOnDesktop)
   }, [])
 
-  return (
-    <>
-      {/* Mobile menu button */}
-      <Button
-        variant="ghost"
-        size="icon"
-        className="fixed top-4 left-4 z-50 lg:hidden"
-        onClick={() => setIsOpen(!isOpen)}
-      >
-        {isOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
-      </Button>
+  const openNavigation = event => {
+    navigationOpener.current = event.currentTarget
+    setIsOpen(true)
+  }
 
-      {/* Overlay for mobile */}
-      {isOpen && (
-        <div
-          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
-          onClick={() => setIsOpen(false)}
-        />
-      )}
-
-      {/* Sidebar */}
-      <aside
+  const renderLink = (item, compact = false) => {
+    const Icon = item.icon
+    const isDisabled = navigationDisabled && item.path !== '/'
+    const isActive = currentItem.path === item.path && (!navigationDisabled || item.path === '/')
+    return (
+      <Link
+        key={item.path}
+        to={item.path}
+        aria-current={isActive ? 'page' : undefined}
+        aria-disabled={isDisabled || undefined}
+        aria-label={compact ? item.text : undefined}
+        tabIndex={isDisabled ? -1 : undefined}
+        onClick={event => {
+          if (isDisabled) event.preventDefault()
+          else setIsOpen(false)
+        }}
         className={cn(
-          "fixed top-0 left-0 h-full bg-card border-r border-border z-40 transition-all duration-300 ease-in-out flex flex-col",
-          isCollapsed ? "w-20" : "w-64",
-          isOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
+          'flex min-h-11 items-center gap-3 rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary',
+          isActive
+            ? 'border-primary/30 bg-primary/15 text-primary dark:text-emerald-200'
+            : 'border-transparent text-muted-foreground hover:bg-muted hover:text-foreground',
+          isDisabled && 'cursor-not-allowed opacity-40',
+          compact && 'lg:mx-auto lg:h-11 lg:w-11 lg:justify-center lg:px-0',
         )}
       >
-        <div className={cn(
-          "p-6 relative flex flex-col",
-          isCollapsed && "items-center px-0"
-        )}>
-          <div className="flex items-center justify-between w-full">
-            {!isCollapsed && (
-              <div className="animate-in fade-in slide-in-from-left-2 duration-300">
-                <h1 className="text-2xl font-bold text-primary">StreamFlow</h1>
-                <p className="text-sm text-muted-foreground">for Dispatcharr</p>
-              </div>
-            )}
+        <Icon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
+        <span className={cn('truncate', compact && 'lg:sr-only')}>{item.text}</span>
+      </Link>
+    )
+  }
 
-            <Button
-              variant="ghost"
-              size="icon"
-              className={cn(
-                "hidden lg:flex h-8 w-8 rounded-full border border-border bg-background shadow-sm hover:bg-accent",
-                isCollapsed ? "mx-auto" : ""
-              )}
-              onClick={() => setIsCollapsed(!isCollapsed)}
-            >
-              {isCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
-            </Button>
+  const renderNavigation = (mobile = false) => {
+    const compact = !mobile && isCollapsed
+    return <>
+        <div className={cn('flex h-20 shrink-0 items-center justify-between gap-2 border-b px-4', compact && 'justify-center px-2')}>
+          <div className={cn('min-w-0', compact && 'hidden')}>
+            <div className="text-lg font-bold tracking-tight text-foreground">
+              <span className="text-primary">Stream</span>Flow
+            </div>
+            <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">for Dispatcharr</div>
           </div>
+          {mobile ? <Button variant="ghost" size="icon" className="h-11 w-11 shrink-0" aria-label="Close navigation" onClick={() => setIsOpen(false)}>
+            <X className="h-5 w-5" />
+          </Button> : <Button
+            variant="outline"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            aria-label={isCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+            aria-expanded={!isCollapsed}
+            onClick={() => setIsCollapsed(!isCollapsed)}
+          >
+            {isCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+          </Button>}
         </div>
 
-        <nav className={cn(
-          "px-3 space-y-1 flex-1 overflow-y-auto overflow-x-hidden pt-2",
-          isCollapsed && "px-2 items-center"
-        )}>
+        <nav className="min-h-0 flex-1 space-y-6 overflow-y-auto px-3 py-5" aria-label="Pages">
           <TooltipProvider delayDuration={0}>
-            {menuItems.map((item) => {
-              const Icon = item.icon
-              const isDashboard = item.path === '/'
-              const isDisabled = navigationDisabled && !isDashboard
-              const isActive = location.pathname === item.path || (navigationDisabled && isDashboard)
-
-              const linkContent = (
-                <Link
-                  key={item.path}
-                  to={item.path}
-                  aria-disabled={isDisabled}
-                  tabIndex={isDisabled ? -1 : undefined}
-                  onClick={(event) => {
-                    if (isDisabled) {
-                      event.preventDefault()
-                      return
-                    }
-                    setIsOpen(false)
-                  }}
-                  className={cn(
-                    "flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group relative",
-                    isActive
-                      ? "bg-primary text-primary-foreground shadow-md"
-                      : "hover:bg-accent hover:text-accent-foreground",
-                    isDisabled && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-muted-foreground",
-                    isCollapsed ? "justify-center px-0 w-12 h-12 mx-auto" : "w-full"
-                  )}
-                >
-                  <Icon className={cn("h-5 w-5 shrink-0", !isActive && "text-muted-foreground group-hover:text-foreground")} />
-                  {!isCollapsed && (
-                    <span className="text-sm font-medium whitespace-nowrap overflow-hidden transition-all duration-300">
-                      {item.text}
-                    </span>
-                  )}
-                  {isActive && isCollapsed && (
-                    <div className="absolute left-0 w-1 h-6 bg-primary-foreground rounded-r-full" />
-                  )}
-                </Link>
-              )
-
-              if (isCollapsed) {
-                return (
-                  <Tooltip key={item.path}>
-                    <TooltipTrigger asChild>
-                      {linkContent}
-                    </TooltipTrigger>
-                    <TooltipContent side="right" className="font-medium">
-                      {item.text}
-                    </TooltipContent>
-                  </Tooltip>
-                )
-              }
-
-              return linkContent
-            })}
+            {navigationGroups.map(group => (
+              <div key={group.label}>
+                <div className={cn('mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.15em] text-muted-foreground/80', compact && 'sr-only')}>
+                  {group.label}
+                </div>
+                <div className="space-y-0.5">
+                  {group.items.map(item => compact ? (
+                    <Tooltip key={item.path}>
+                      <TooltipTrigger asChild>{renderLink(item, true)}</TooltipTrigger>
+                      <TooltipContent side="right">{item.text}</TooltipContent>
+                    </Tooltip>
+                  ) : renderLink(item))}
+                </div>
+              </div>
+            ))}
           </TooltipProvider>
         </nav>
 
-        <div className={cn(
-          "p-3 border-t border-border space-y-2 mt-auto bg-card/50",
-          isCollapsed && "flex flex-col items-center px-0"
-        )}>
-          <div className={cn(
-            "flex items-center justify-between w-full px-2",
-            isCollapsed && "flex-col gap-4 justify-center"
-          )}>
-            {!isCollapsed && <span className="text-sm text-muted-foreground font-medium">Theme</span>}
-            <div className={cn(isCollapsed ? "scale-90" : "")}>
-              <ThemeToggle />
-            </div>
+        <div className="shrink-0 space-y-3 border-t px-4 py-4">
+          <div className={cn('flex items-center justify-between gap-2', compact && 'justify-center')}>
+            <span className={cn('text-xs text-muted-foreground', compact && 'hidden')}>Appearance</span>
+            <ThemeToggle />
           </div>
-          {!isCollapsed && publicIp && (
-            <div className="px-2 space-y-1">
-              <span className="text-xs text-muted-foreground font-medium">Public IP</span>
-              <div className="rounded-md border border-border bg-background px-2 py-1.5">
-                <span className="text-xs font-mono text-foreground block text-center">
-                  {publicIp}
-                </span>
-              </div>
-            </div>
-          )}
-          {version && (
-            <div className={cn(
-              "pt-2 text-[10px] text-muted-foreground text-center font-mono opacity-60",
-              isCollapsed ? "w-full overflow-hidden truncate px-1" : ""
-            )}>
-              {isCollapsed ? version.split('-')[0] : `v${version}`}
-            </div>
-          )}
+          {publicIp && <div className={cn('text-[11px] text-muted-foreground', compact && 'hidden')}>Public IP <span className="block truncate font-mono text-foreground">{publicIp}</span></div>}
+          {version && <div className="truncate text-[10px] text-muted-foreground" title={version}>v{version}</div>}
         </div>
+    </>
+  }
+
+  return (
+    <>
+      <header className="fixed inset-x-0 top-0 z-30 flex h-14 items-center justify-between gap-3 border-b bg-card/95 px-4 backdrop-blur lg:hidden">
+        <span className="min-w-0 truncate text-sm font-semibold">
+          <span className="mr-2 text-primary">StreamFlow</span>
+          <span className="text-muted-foreground">/</span> {currentItem.text}
+        </span>
+        <Button variant="ghost" size="icon" className="h-11 w-11" aria-label="Open all navigation" aria-haspopup="dialog" aria-expanded={isOpen} onClick={openNavigation}>
+          <Menu className="h-5 w-5" />
+        </Button>
+      </header>
+
+      <aside aria-label="Main navigation" className={cn('fixed inset-y-0 left-0 z-30 hidden flex-col border-r bg-card lg:flex', isCollapsed ? 'w-20' : 'w-56')}>
+        {renderNavigation()}
       </aside>
+
+      <DialogPrimitive.Root open={isOpen} onOpenChange={setIsOpen}>
+        <DialogPrimitive.Portal>
+          <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/60" />
+          <DialogPrimitive.Content
+            className="fixed inset-y-0 left-0 z-50 flex w-72 max-w-[calc(100vw-2rem)] flex-col border-r bg-card shadow-xl outline-none"
+            aria-describedby={undefined}
+            onKeyDown={event => {
+              // Radix handles Escape during capture. Keep an unhandled key usable
+              // while its layer registration settles after rapid focus changes.
+              // Portal menus and nested dialogs retain their own Escape behavior.
+              if (event.key !== 'Escape' || event.defaultPrevented) return
+              if (!event.currentTarget.contains(event.target)) return
+              if (event.target.closest('[role="dialog"]') !== event.currentTarget) return
+              if (event.target.closest('[role="menu"], [role="listbox"]')) return
+              if (event.currentTarget.querySelector('[aria-haspopup="menu"][aria-expanded="true"]')) return
+              event.preventDefault()
+              setIsOpen(false)
+            }}
+            onCloseAutoFocus={event => {
+              event.preventDefault()
+              const opener = navigationOpener.current
+              if (opener?.isConnected && opener.getClientRects().length) opener.focus()
+            }}
+          >
+            <DialogPrimitive.Title className="sr-only">StreamFlow navigation</DialogPrimitive.Title>
+            {renderNavigation(true)}
+          </DialogPrimitive.Content>
+        </DialogPrimitive.Portal>
+      </DialogPrimitive.Root>
+
+      <nav aria-label="Quick navigation" className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t bg-card/95 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden">
+        {primaryNavigation.map(item => {
+          const Icon = item.icon
+          const active = currentItem.path === item.path
+          const disabled = navigationDisabled && item.path !== '/'
+          return (
+            <Link
+              key={item.path}
+              to={item.path}
+              aria-current={active ? 'page' : undefined}
+              aria-disabled={disabled || undefined}
+              tabIndex={disabled ? -1 : undefined}
+              onClick={event => { if (disabled) event.preventDefault() }}
+              className={cn('flex min-h-16 flex-col items-center justify-center gap-1 text-[10px] font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary', active ? 'text-primary' : 'text-muted-foreground', disabled && 'opacity-40')}
+            >
+              <Icon className="h-5 w-5" aria-hidden="true" />
+              {item.text}
+            </Link>
+          )
+        })}
+        <button type="button" onClick={openNavigation} aria-label="More pages" aria-haspopup="dialog" aria-expanded={isOpen} className={cn('flex min-h-16 flex-col items-center justify-center gap-1 text-[10px] font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary', primaryNavigation.includes(currentItem) ? 'text-muted-foreground' : 'text-primary')}>
+          <Menu className="h-5 w-5" aria-hidden="true" />
+          More
+        </button>
+      </nav>
     </>
   )
 }

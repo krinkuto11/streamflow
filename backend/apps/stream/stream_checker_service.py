@@ -1360,22 +1360,19 @@ class StreamCheckerService:
     @staticmethod
     def _build_write_back_valid_stream_ids(
         udi: Any,
-        assignment_stream_ids: List[int],
         dead_stream_removal_enabled: bool,
     ) -> Optional[set]:
-        """Return valid IDs for write-back without losing assigned cache misses."""
+        """Return cached IDs; the writer verifies cache misses with Dispatcharr."""
         if dead_stream_removal_enabled:
             return None
 
-        valid_stream_ids = set()
         try:
             get_valid_stream_ids = getattr(udi, 'get_valid_stream_ids', None)
             if callable(get_valid_stream_ids):
-                valid_stream_ids.update(get_valid_stream_ids() or set())
+                return set(get_valid_stream_ids() or set())
         except Exception as exc:
             logger.warning("Could not read UDI valid stream IDs before write-back: %s", exc)
-        valid_stream_ids.update(assignment_stream_ids or [])
-        return valid_stream_ids
+        return set()
 
     @staticmethod
     def _get_uncached_channel_stream_ids(
@@ -1399,6 +1396,26 @@ class StreamCheckerService:
             if sid not in cached_stream_id_set
             and (not dead_stream_removal_enabled or sid not in dead_stream_ids)
         ]
+
+    @staticmethod
+    def _limit_write_back_stream_ids(
+        stream_ids: List[int],
+        stream_limit: int,
+        protected_stream_ids: set,
+    ) -> List[int]:
+        """Apply the channel limit to the final assignment, keeping active viewers."""
+        ordered_ids = list(dict.fromkeys(stream_ids))
+        if stream_limit <= 0 or len(ordered_ids) <= stream_limit:
+            return ordered_ids
+
+        protected = set(ordered_ids).intersection(protected_stream_ids or set())
+        capacity = max(stream_limit, len(protected))
+        retained = set(protected)
+        for stream_id in ordered_ids:
+            if len(retained) >= capacity:
+                break
+            retained.add(stream_id)
+        return [stream_id for stream_id in ordered_ids if stream_id in retained]
 
     def _is_stream_dead(self, stream_data: Dict[str, Any], channel_id: Optional[int] = None, threshold_config: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
         """
@@ -4669,6 +4686,7 @@ class StreamCheckerService:
                 _hb_thread = threading.Thread(target=_heartbeat, daemon=True, name='stream-checker-heartbeat')
                 _hb_thread.start()
 
+                bitrate_recheck_enabled = self._is_bitrate_recheck_enabled()
                 try:
                     # Check streams in parallel with account-aware limits
                     results = smart_scheduler.check_streams_with_limits(
@@ -4696,7 +4714,8 @@ class StreamCheckerService:
                         freeze_check_noise_threshold=analysis_params.get('freeze_check_noise_threshold', 0.001),
                         freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80),
                         hardware_acceleration=analysis_params.get('hardware_acceleration'),
-                        defer_missing_bitrate_retry=self._is_bitrate_recheck_enabled(),
+                        defer_missing_bitrate_retry=bitrate_recheck_enabled,
+                        retry_missing_bitrate=bitrate_recheck_enabled,
                     )
                 finally:
                     _heartbeat_stop.set()
@@ -5366,13 +5385,11 @@ class StreamCheckerService:
             # Dead streams have already been filtered from analyzed_streams if removal is enabled
             # If removal is disabled, allow them to remain in the channel
             
-            # Preserve any stream IDs that are assigned to the channel in Dispatcharr but
-            # were not returned by get_channel_streams() due to a stale UDI stream cache.
-            # Without this guard, a stale cache causes those streams to be silently dropped
-            # when the checker PATCHes the channel's stream list back to Dispatcharr.
+            # Compare with the loaded cache IDs, not reordered_ids: the latter has
+            # already been truncated by the profile stream limit.
             _uncached_ids = self._get_uncached_channel_stream_ids(
                 assigned_stream_ids,
-                set(reordered_ids),
+                set(current_stream_ids),
                 dead_stream_removal_enabled,
                 dead_stream_ids,
             )
@@ -5384,12 +5401,29 @@ class StreamCheckerService:
                     f"{_uncached_ids[:5]}{'...' if len(_uncached_ids) > 5 else ''}"
                 )
                 reordered_ids.extend(_uncached_ids)
+            reordered_ids = self._limit_write_back_stream_ids(
+                reordered_ids,
+                stream_limit,
+                protected_active_stream_ids,
+            )
 
             write_back_valid_stream_ids = self._build_write_back_valid_stream_ids(
                 udi,
-                assigned_stream_ids,
                 dead_stream_removal_enabled,
             )
+
+            if get_session_manager().is_channel_in_active_session(channel_id):
+                logger.info(
+                    "Skipping channel %s write-back because monitoring now owns it",
+                    channel_name,
+                )
+                return {
+                    'success': True,
+                    'skipped': True,
+                    'reason': 'in_monitoring_session',
+                    'channel_id': channel_id,
+                    'channel_name': channel_name,
+                }
 
             if not hasattr(update_channel_streams, "mock_calls"):
                 failed_connectivity = self._require_quality_check_connectivity(
@@ -5406,7 +5440,7 @@ class StreamCheckerService:
                         queue_entry_token=queue_entry_token,
                     )
 
-            update_authorized, _ = self._run_channel_side_effect_if_authorized(
+            update_authorized, update_succeeded = self._run_channel_side_effect_if_authorized(
                 channel_id,
                 queue_entry_token,
                 lambda: update_channel_streams(
@@ -5415,6 +5449,7 @@ class StreamCheckerService:
                     valid_stream_ids=write_back_valid_stream_ids,
                     allow_dead_streams=(not dead_stream_removal_enabled),
                     protected_stream_ids=protected_active_stream_ids,
+                    expected_current_stream_ids=assigned_stream_ids,
                 ),
             )
             if not update_authorized:
@@ -5422,6 +5457,10 @@ class StreamCheckerService:
                     channel_id,
                     channel_name,
                     queue_entry_token=queue_entry_token,
+                )
+            if not update_succeeded:
+                raise RuntimeError(
+                    f"Dispatcharr rejected stream assignment for channel {channel_id}"
                 )
             
             # Verify the update
@@ -5718,6 +5757,7 @@ class StreamCheckerService:
                 'dead_streams_count': 0,
                 'revived_streams_count': 0,
                 'checked_streams': [],
+                'success': False,
                 'error': str(e)
             }
         
@@ -6222,6 +6262,7 @@ class StreamCheckerService:
                 if udi:
                     stream_url = udi.apply_profile_url_transformation(stream)
                 
+                bitrate_recheck_enabled = self._is_bitrate_recheck_enabled()
                 analyzed = analyze_stream(
                     stream_url=stream_url,
                     stream_id=stream['id'],
@@ -6241,7 +6282,8 @@ class StreamCheckerService:
                     freeze_check_noise_threshold=analysis_params.get('freeze_check_noise_threshold', 0.001),
                     freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80),
                     hardware_acceleration=analysis_params.get('hardware_acceleration'),
-                    defer_missing_bitrate_retry=self._is_bitrate_recheck_enabled(),
+                    defer_missing_bitrate_retry=bitrate_recheck_enabled,
+                    retry_missing_bitrate=bitrate_recheck_enabled,
                 )
 
                 def recheck_sequential_bitrate(_stream, _initial):
@@ -6702,13 +6744,11 @@ class StreamCheckerService:
             # Dead streams have already been filtered from analyzed_streams if removal is enabled
             # If removal is disabled, allow them to remain in the channel
 
-            # Preserve any stream IDs that are assigned to the channel in Dispatcharr but
-            # were not returned by get_channel_streams() due to a stale UDI stream cache.
-            # Without this guard, a stale cache causes those streams to be silently dropped
-            # when the checker PATCHes the channel's stream list back to Dispatcharr.
+            # Compare with the loaded cache IDs, not reordered_ids: the latter has
+            # already been truncated by the profile stream limit.
             _uncached_ids = self._get_uncached_channel_stream_ids(
                 assigned_stream_ids,
-                set(reordered_ids),
+                set(current_stream_ids),
                 dead_stream_removal_enabled,
                 dead_stream_ids,
             )
@@ -6720,12 +6760,29 @@ class StreamCheckerService:
                     f"{_uncached_ids[:5]}{'...' if len(_uncached_ids) > 5 else ''}"
                 )
                 reordered_ids.extend(_uncached_ids)
+            reordered_ids = self._limit_write_back_stream_ids(
+                reordered_ids,
+                stream_limit,
+                protected_active_stream_ids,
+            )
 
             write_back_valid_stream_ids = self._build_write_back_valid_stream_ids(
                 udi,
-                assigned_stream_ids,
                 dead_stream_removal_enabled,
             )
+
+            if get_session_manager().is_channel_in_active_session(channel_id):
+                logger.info(
+                    "Skipping channel %s write-back because monitoring now owns it",
+                    channel_name,
+                )
+                return {
+                    'success': True,
+                    'skipped': True,
+                    'reason': 'in_monitoring_session',
+                    'channel_id': channel_id,
+                    'channel_name': channel_name,
+                }
 
             if not hasattr(update_channel_streams, "mock_calls"):
                 failed_connectivity = self._require_quality_check_connectivity(
@@ -6742,7 +6799,7 @@ class StreamCheckerService:
                         queue_entry_token=queue_entry_token,
                     )
 
-            update_authorized, _ = self._run_channel_side_effect_if_authorized(
+            update_authorized, update_succeeded = self._run_channel_side_effect_if_authorized(
                 channel_id,
                 queue_entry_token,
                 lambda: update_channel_streams(
@@ -6751,6 +6808,7 @@ class StreamCheckerService:
                     valid_stream_ids=write_back_valid_stream_ids,
                     allow_dead_streams=(not dead_stream_removal_enabled),
                     protected_stream_ids=protected_active_stream_ids,
+                    expected_current_stream_ids=assigned_stream_ids,
                 ),
             )
             if not update_authorized:
@@ -6758,6 +6816,10 @@ class StreamCheckerService:
                     channel_id,
                     channel_name,
                     queue_entry_token=queue_entry_token,
+                )
+            if not update_succeeded:
+                raise RuntimeError(
+                    f"Dispatcharr rejected stream assignment for channel {channel_id}"
                 )
             
             # Verify the update was applied correctly
@@ -7039,7 +7101,9 @@ class StreamCheckerService:
             return {
                 'dead_streams_count': 0,
                 'revived_streams_count': 0,
-                'checked_streams': []
+                'checked_streams': [],
+                'success': False,
+                'error': str(e),
             }
         
         finally:
@@ -8922,7 +8986,18 @@ class StreamCheckerService:
                     else:
                         stream_id_whitelist = None
                         
-                    if concurrent_enabled:
+                    if get_session_manager().is_channel_in_active_session(channel_id):
+                        logger.info(
+                            "Skipping synchronous quality check for monitored channel %s",
+                            channel_id,
+                        )
+                        channel_result = {
+                            'success': True,
+                            'skipped': True,
+                            'reason': 'in_monitoring_session',
+                            'channel_id': channel_id,
+                        }
+                    elif concurrent_enabled:
                         channel_result = self._check_channel_concurrent(
                             channel_id,
                             skip_batch_changelog=True,
@@ -8943,7 +9018,12 @@ class StreamCheckerService:
                     results[channel_id] = channel_result
                     with self.lock:
                         if self.sync_batch_state.get('generation') == sync_generation and self.sync_batch_state.get('active'):
-                            if isinstance(channel_result, dict) and channel_result.get('aborted'):
+                            if (
+                                not isinstance(channel_result, dict)
+                                or channel_result.get('aborted')
+                                or channel_result.get('success') is False
+                                or channel_result.get('error')
+                            ):
                                 self.sync_batch_state['failed'] += 1
                             else:
                                 self.sync_batch_state['completed'] += 1
@@ -9642,12 +9722,49 @@ class StreamCheckerService:
                     
                     # Run validation scoped to this channel only
                     validation_results = automation_manager.validate_and_remove_non_matching_streams(channel_id=channel_id)
+                    if not isinstance(validation_results, dict) or (
+                        validation_results.get('success') is False
+                        or validation_results.get('aborted')
+                        or validation_results.get('error')
+                    ):
+                        clear_operation_progress()
+                        if isinstance(validation_results, dict) and validation_results.get('aborted'):
+                            logger.info("Stream validation aborted for channel %s", channel_name)
+                            return {
+                                'success': False,
+                                'error': 'aborted',
+                                'aborted': True,
+                                'channel_id': channel_id,
+                                'channel_name': channel_name,
+                            }
+                        validation_error = (
+                            validation_results.get('error')
+                            if isinstance(validation_results, dict) else None
+                        )
+                        logger.error(
+                            "Stream validation failed for channel %s: %s",
+                            channel_name,
+                            validation_error,
+                        )
+                        return {
+                            'success': False,
+                            'error': validation_error or 'stream_validation_failed',
+                            'channel_id': channel_id,
+                            'channel_name': channel_name,
+                        }
                     if validation_results.get("streams_removed", 0) > 0:
                         logger.info(f"✓ Removed {validation_results['streams_removed']} non-matching streams")
                     else:
                         logger.info("✓ No non-matching streams found to remove")
-                except Exception as e:
-                    logger.error(f"✗ Failed to validate streams: {e}")
+                except Exception:
+                    logger.error("Failed to validate streams for channel %s", channel_name, exc_info=True)
+                    clear_operation_progress()
+                    return {
+                        'success': False,
+                        'error': 'stream_validation_failed',
+                        'channel_id': channel_id,
+                        'channel_name': channel_name,
+                    }
             else:
                 logger.info(f"Step 4/6: Skipping stream validation (matching is disabled for this channel)")
                 update_single_channel_progress(
@@ -9719,12 +9836,43 @@ class StreamCheckerService:
                         channel_id=channel_id,
                         allow_dead_streams=_step5_allow_dead_streams,
                     )
+                    if isinstance(assignments, dict) and (
+                        assignments.get('success') is False or assignments.get('aborted')
+                    ):
+                        clear_operation_progress()
+                        if assignments.get('aborted'):
+                            logger.info("Stream matching aborted for channel %s", channel_name)
+                            return {
+                                'success': False,
+                                'error': 'aborted',
+                                'aborted': True,
+                                'channel_id': channel_id,
+                                'channel_name': channel_name,
+                            }
+                        logger.error(
+                            "Stream matching failed for channel %s: %s",
+                            channel_name,
+                            assignments.get('error'),
+                        )
+                        return {
+                            'success': False,
+                            'error': assignments.get('error') or 'stream_matching_failed',
+                            'channel_id': channel_id,
+                            'channel_name': channel_name,
+                        }
                     if assignments:
                         logger.info(f"✓ Stream matching completed")
                     else:
                         logger.info("✓ No new stream assignments")
-                except Exception as e:
-                    logger.error(f"✗ Failed to match streams: {e}")
+                except Exception:
+                    logger.error("Failed to match streams for channel %s", channel_name, exc_info=True)
+                    clear_operation_progress()
+                    return {
+                        'success': False,
+                        'error': 'stream_matching_failed',
+                        'channel_id': channel_id,
+                        'channel_name': channel_name,
+                    }
             else:
                 logger.info(f"Step 5/6: Skipping stream matching (matching is disabled for this channel)")
                 update_single_channel_progress(
@@ -9808,9 +9956,14 @@ class StreamCheckerService:
                     _check_kwargs['queue_entry_token'] = _queue_entry_token
                 check_result = self._check_channel(channel_id, **_check_kwargs)
                 if not check_result or not isinstance(check_result, dict):
-                    # This should not happen with updated methods, but provide safe fallback
-                    logger.warning(f"_check_channel did not return expected result dict, using defaults")
-                    check_result = {'dead_streams_count': 0, 'revived_streams_count': 0}
+                    logger.error("Quality check returned no valid result for channel %s", channel_name)
+                    clear_operation_progress()
+                    return {
+                        'success': False,
+                        'error': 'channel_check_failed',
+                        'channel_id': channel_id,
+                        'channel_name': channel_name,
+                    }
                 if check_result.get('aborted') or check_result.get('error') == 'aborted':
                     clear_operation_progress()
                     return {
@@ -9818,6 +9971,15 @@ class StreamCheckerService:
                         'success': False,
                         'error': 'aborted',
                         'aborted': True,
+                        'channel_id': channel_id,
+                        'channel_name': channel_name,
+                    }
+                if check_result.get('success') is False or check_result.get('error'):
+                    clear_operation_progress()
+                    return {
+                        **check_result,
+                        'success': False,
+                        'error': check_result.get('error') or 'channel_check_failed',
                         'channel_id': channel_id,
                         'channel_name': channel_name,
                     }
@@ -10513,6 +10675,7 @@ class StreamCheckerService:
                 bool(loop_check_enabled),
             )
 
+            bitrate_recheck_enabled = self._is_bitrate_recheck_enabled()
             initial_results = self._run_capacity_limited_stream_probes(
                 [stream_data],
                 udi=udi,
@@ -10531,7 +10694,8 @@ class StreamCheckerService:
                 freeze_check_noise_threshold=analysis_params.get('freeze_check_noise_threshold', 0.001),
                 freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80),
                 hardware_acceleration=analysis_params.get('hardware_acceleration'),
-                defer_missing_bitrate_retry=self._is_bitrate_recheck_enabled(),
+                defer_missing_bitrate_retry=bitrate_recheck_enabled,
+                retry_missing_bitrate=bitrate_recheck_enabled,
             )
 
             if self.abort_current_check.is_set():

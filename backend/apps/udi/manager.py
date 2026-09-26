@@ -1771,8 +1771,7 @@ class UDIManager:
             result = self.fetcher.fetch_channels()
             channel_ids: Optional[Set[int]] = None
             try:
-                current_ids = self.fetcher.fetch_all_ids()
-                channel_ids = current_ids.get('channels') if isinstance(current_ids, dict) else None
+                channel_ids = self.fetcher.fetch_channel_ids()
             except Exception as exc:
                 logger.debug("Channel refresh could not fetch channel IDs oracle: %s", exc)
             channels, rehydrated_missing_count = self._rehydrate_missing_channel_ids(

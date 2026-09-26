@@ -290,6 +290,35 @@ class TestBlankDetectionFfmpegCommand(unittest.TestCase):
         self.assertTrue(result["freeze_detected"])
 
     @patch.object(stream_check_utils.subprocess, "run")
+    def test_truncated_visual_events_report_incomplete_measurement(self, mock_run):
+        visual_result = subprocess.CompletedProcess(
+            ["ffmpeg"],
+            0,
+            stdout="",
+            stderr=_ffmpeg_output(
+                "[blackdetect @ 000] black_start:0 black_end:8 black_duration:8"
+            ),
+        )
+        visual_result.stderr_capture_incomplete = True
+        mock_run.side_effect = [
+            Mock(stderr=_ffmpeg_output(), returncode=0),
+            visual_result,
+        ]
+
+        result = get_stream_info_and_bitrate(
+            "http://example.com/test.m3u8",
+            duration=30,
+            timeout=30,
+            blank_check_enabled=True,
+        )
+
+        self.assertEqual(result["bitrate_kbps"], 3333.3)
+        self.assertTrue(result["visual_probe_incomplete"])
+        self.assertEqual(result["visual_probe_incomplete_reason"], "stderr_capture_incomplete")
+        self.assertTrue(result["measurement_incomplete"])
+        self.assertFalse(result["blank_detected"])
+
+    @patch.object(stream_check_utils.subprocess, "run")
     def test_blank_detection_disabled_preserves_plain_quality_command(self, mock_run):
         mock_run.return_value = Mock(stderr=_ffmpeg_output(), returncode=0)
 

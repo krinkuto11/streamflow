@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
+import { Alert } from '@/components/ui/alert.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Input } from '@/components/ui/input.jsx'
 import { Label } from '@/components/ui/label.jsx'
@@ -8,15 +9,15 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.j
 import { AlertCircle, CheckCircle2, KeyRound, Loader2, UserRound } from 'lucide-react'
 import { Separator } from '@/components/ui/separator.jsx'
 import { useToast } from '@/hooks/use-toast.js'
-import { automationAPI, streamCheckerAPI, dispatcharrAPI, sessionSettingsAPI, schedulingAPI } from '@/services/api.js'
+import { automationAPI, dispatcharrAPI, sessionSettingsAPI, schedulingAPI } from '@/services/api.js'
 import AutomationProfileStudio from '@/components/Automation/AutomationProfileStudio.jsx'
 import AutomationPeriods from '@/components/Automation/AutomationPeriods.jsx'
+import { saveSettingsSection, SETTINGS_SAVE_DEPENDENCIES } from '@/lib/settings-save.js'
 
 const DEFAULT_UDI_REFRESH_INTERVAL_MINUTES = 240
 
 export default function AutomationSettings() {
   const [config, setConfig] = useState(null)
-  const [streamCheckerConfig, setStreamCheckerConfig] = useState(null)
   const [dispatcharrConfig, setDispatcharrConfig] = useState(null)
   const [sessionConfig, setSessionConfig] = useState({ review_duration: 60 })
   const [schedulingConfig, setSchedulingConfig] = useState({
@@ -28,6 +29,7 @@ export default function AutomationSettings() {
   const [connectionTestResult, setConnectionTestResult] = useState(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [loadedSections, setLoadedSections] = useState({})
 
   const { toast } = useToast()
 
@@ -38,23 +40,38 @@ export default function AutomationSettings() {
   const loadConfig = async () => {
     try {
       setLoading(true)
-      const [automationResponse, streamCheckerResponse, dispatcharrResponse, sessionResponse, schedulingResponse] = await Promise.all([
+      const [automationResult, dispatcharrResult, sessionResult, schedulingResult] = await Promise.allSettled([
         automationAPI.getConfig(),
-        streamCheckerAPI.getConfig(),
         dispatcharrAPI.getConfig(),
         sessionSettingsAPI.getSettings(),
         schedulingAPI.getConfig(),
       ])
-      setConfig(automationResponse.data)
-      setStreamCheckerConfig(streamCheckerResponse.data)
-      setDispatcharrConfig({
-        ...dispatcharrResponse.data,
-        auth_mode: dispatcharrResponse.data?.auth_mode || 'credentials',
-        api_key: '',
-        password: '',
-      })
-      setSessionConfig(sessionResponse.data)
-      setSchedulingConfig(schedulingResponse.data)
+      const loaded = {
+        automation: automationResult.status === 'fulfilled',
+        connection: dispatcharrResult.status === 'fulfilled',
+        monitoring: sessionResult.status === 'fulfilled',
+        scheduling: schedulingResult.status === 'fulfilled',
+      }
+      setLoadedSections(loaded)
+      if (loaded.automation) setConfig(automationResult.value.data)
+      if (loaded.connection) {
+        setDispatcharrConfig({
+          ...dispatcharrResult.value.data,
+          auth_mode: dispatcharrResult.value.data?.auth_mode || 'credentials',
+          api_key: '',
+          password: '',
+        })
+      }
+      if (loaded.monitoring) setSessionConfig(sessionResult.value.data)
+      if (loaded.scheduling) setSchedulingConfig(schedulingResult.value.data)
+      const failed = Object.entries(loaded).filter(([, success]) => !success).map(([section]) => section)
+      if (failed.length > 0) {
+        toast({
+          title: 'Some settings could not load',
+          description: `${failed.join(', ')} settings are unavailable. Retry before saving those sections.`,
+          variant: 'destructive',
+        })
+      }
     } catch (err) {
       console.error('Failed to load config:', err)
       toast({
@@ -67,24 +84,38 @@ export default function AutomationSettings() {
     }
   }
 
-  const handleSave = async () => {
+  const handleSave = async (section) => {
+    const dependencies = SETTINGS_SAVE_DEPENDENCIES[section]
+    if (!dependencies || dependencies.some(name => !loadedSections[name])) return
     try {
       setSaving(true)
-      await Promise.all([
-        automationAPI.updateConfig(config),
-        streamCheckerAPI.updateConfig(streamCheckerConfig),
-        dispatcharrAPI.updateConfig(dispatcharrConfig),
-        sessionSettingsAPI.updateSettings(sessionConfig),
-        schedulingAPI.updateConfig(schedulingConfig),
-      ])
+      const { saved, failed } = await saveSettingsSection(section, {
+        automation: config,
+        scheduling: schedulingConfig,
+        monitoring: sessionConfig,
+        connection: dispatcharrConfig,
+      }, {
+        automation: automationAPI,
+        scheduling: schedulingAPI,
+        monitoring: sessionSettingsAPI,
+        connection: dispatcharrAPI,
+      })
+      if (failed.length > 0) {
+        toast({
+          title: saved.length > 0 ? 'Settings partially saved' : 'Settings not saved',
+          description: `${saved.length ? `Saved: ${saved.join(', ')}. ` : ''}Failed: ${failed.join(', ')}. Retry this section.`,
+          variant: 'destructive',
+        })
+        return
+      }
       toast({
         title: "Success",
-        description: "Configuration saved successfully",
+        description: `${section.charAt(0).toUpperCase()}${section.slice(1)} settings saved successfully`,
       })
     } catch (err) {
       toast({
         title: "Error",
-        description: "Failed to save configuration",
+        description: `Failed to save ${section} settings`,
         variant: "destructive"
       })
     } finally {
@@ -97,39 +128,6 @@ export default function AutomationSettings() {
       ...prev,
       [field]: value
     }))
-  }
-
-  const handleStreamCheckerConfigChange = (field, value) => {
-    if (field.includes('.')) {
-      const parts = field.split('.')
-      if (parts.length === 2) {
-        const [parent, child] = parts
-        setStreamCheckerConfig(prev => ({
-          ...prev,
-          [parent]: {
-            ...(prev[parent] || {}),
-            [child]: value
-          }
-        }))
-      } else if (parts.length === 3) {
-        const [parent, child, grandchild] = parts
-        setStreamCheckerConfig(prev => ({
-          ...prev,
-          [parent]: {
-            ...(prev[parent] || {}),
-            [child]: {
-              ...(prev[parent]?.[child] || {}),
-              [grandchild]: value
-            }
-          }
-        }))
-      }
-    } else {
-      setStreamCheckerConfig(prev => ({
-        ...prev,
-        [field]: value
-      }))
-    }
   }
 
   const handleDispatcharrConfigChange = (field, value) => {
@@ -208,19 +206,30 @@ export default function AutomationSettings() {
   return (
     <div className="space-y-6">
       <div>
+        <div className="mb-2 text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Configure</div>
         <h1 className="text-3xl font-bold tracking-tight">Settings</h1>
         <p className="text-muted-foreground">
           Configure Dispatcharr connection, automation profiles, and system parameters
         </p>
       </div>
 
+      {Object.values(loadedSections).some(success => !success) && (
+        <Alert variant="destructive" className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="h-4 w-4" />
+            <span>Some settings are unavailable. Saving affected sections is disabled until they load.</span>
+          </div>
+          <Button type="button" variant="outline" size="sm" onClick={loadConfig}>Retry loading</Button>
+        </Alert>
+      )}
+
       <Tabs defaultValue="periods" className="w-full">
-        <TabsList className="grid w-full grid-cols-5">
-          <TabsTrigger value="periods">Periods</TabsTrigger>
-          <TabsTrigger value="automation">Profiles</TabsTrigger>
-          <TabsTrigger value="scheduling">Scheduling</TabsTrigger>
-          <TabsTrigger value="monitoring">Monitoring</TabsTrigger>
-          <TabsTrigger value="connection">Connection</TabsTrigger>
+        <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto p-1">
+          <TabsTrigger value="periods" className="shrink-0">Periods</TabsTrigger>
+          <TabsTrigger value="automation" className="shrink-0">Profiles</TabsTrigger>
+          <TabsTrigger value="scheduling" className="shrink-0">Scheduling</TabsTrigger>
+          <TabsTrigger value="monitoring" className="shrink-0">Monitoring</TabsTrigger>
+          <TabsTrigger value="connection" className="shrink-0">Connection</TabsTrigger>
         </TabsList>
 
         <TabsContent value="periods" className="space-y-6">
@@ -240,7 +249,7 @@ export default function AutomationSettings() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-2 gap-8">
+              <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 sm:gap-8">
                 {/* EPG Refresh — left column */}
                 <div className="space-y-2">
                   <Label htmlFor="refresh-interval">EPG Refresh Interval (minutes)</Label>
@@ -290,7 +299,7 @@ export default function AutomationSettings() {
                 </div>
               </div>
               <div className="flex justify-end pt-4">
-                <Button onClick={handleSave} disabled={saving}>
+                <Button onClick={() => handleSave('scheduling')} disabled={saving || !loadedSections.scheduling || !loadedSections.automation}>
                   {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   Save Settings
                 </Button>
@@ -462,7 +471,7 @@ export default function AutomationSettings() {
               </div>
 
               <div className="flex justify-end pt-2">
-                <Button onClick={handleSave} disabled={saving}>
+                <Button onClick={() => handleSave('scheduling')} disabled={saving || !loadedSections.scheduling || !loadedSections.automation}>
                   {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   Save Settings
                 </Button>
@@ -494,7 +503,7 @@ export default function AutomationSettings() {
                 </p>
               </div>
               <div className="flex justify-end pt-4">
-                <Button onClick={handleSave} disabled={saving}>
+                <Button onClick={() => handleSave('monitoring')} disabled={saving || !loadedSections.monitoring}>
                   {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   Save Settings
                 </Button>
@@ -639,7 +648,7 @@ export default function AutomationSettings() {
                 )}
               </div>
               <div className="flex justify-end pt-4">
-                <Button onClick={handleSave} disabled={saving}>
+                <Button onClick={() => handleSave('connection')} disabled={saving || !loadedSections.connection}>
                   {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   Save Settings
                 </Button>

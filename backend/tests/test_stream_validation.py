@@ -26,6 +26,17 @@ class TestStreamValidation(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures."""
+        authoritative_patch = patch('api_utils.fetch_data_from_url', return_value=[1, 2, 3])
+        self.authoritative_fetch = authoritative_patch.start()
+        self.addCleanup(authoritative_patch.stop)
+        channel_patch = patch('api_utils._fetch_authoritative_channel_stream_ids', return_value=[1])
+        self.channel_fetch = channel_patch.start()
+        self.addCleanup(channel_patch.stop)
+        dead_filter_patch = patch(
+            'api_utils.filter_dead_streams', side_effect=lambda ids: (ids, 0)
+        )
+        dead_filter_patch.start()
+        self.addCleanup(dead_filter_patch.stop)
         # Mock valid streams in Dispatcharr
         self.valid_streams = [
             {'id': 1, 'name': 'Stream 1', 'url': 'http://example.com/stream1.m3u8'},
@@ -48,6 +59,7 @@ class TestStreamValidation(unittest.TestCase):
         mock_response = Mock()
         mock_response.status_code = 200
         mock_patch.return_value = mock_response
+        self.channel_fetch.return_value = [1, 2]
         
         # Try to update channel with mix of valid and invalid stream IDs
         stream_ids = [1, 2, 999, 1000]  # 999 and 1000 don't exist
@@ -75,6 +87,7 @@ class TestStreamValidation(unittest.TestCase):
         mock_response = Mock()
         mock_response.status_code = 200
         mock_patch.return_value = mock_response
+        self.channel_fetch.return_value = [1, 2, 3]
 
         result = update_channel_streams(1, [1, 2, 2, 3, 1, 999], allow_dead_streams=True)
 
@@ -98,6 +111,7 @@ class TestStreamValidation(unittest.TestCase):
         mock_response = Mock()
         mock_response.status_code = 200
         mock_patch.return_value = mock_response
+        self.channel_fetch.return_value = []
         
         # Try to update channel with all invalid stream IDs
         stream_ids = [999, 1000, 1001]
@@ -129,6 +143,7 @@ class TestStreamValidation(unittest.TestCase):
         mock_response = Mock()
         mock_response.status_code = 200
         mock_patch.return_value = mock_response
+        self.channel_fetch.side_effect = [[1], [1], [1, 2, 3]]
         
         # Try to add mix of valid and invalid stream IDs
         stream_ids = [2, 3, 999, 1000]  # 999 and 1000 don't exist
@@ -159,6 +174,7 @@ class TestStreamValidation(unittest.TestCase):
         mock_response = Mock()
         mock_response.status_code = 200
         mock_patch.return_value = mock_response
+        self.channel_fetch.side_effect = [[1], [1], [1, 2, 3]]
 
         result = add_streams_to_channel(1, [2, 2, 3, 3, 1], allow_dead_streams=True)
 
@@ -210,11 +226,13 @@ class TestStreamValidation(unittest.TestCase):
             {'id': 999, 'name': 'Removed Stream'}  # This stream no longer exists
         ]
         mock_get_udi.return_value = mock_udi
+        self.channel_fetch.return_value = [1, 999]
         
         # Mock successful patch request
         mock_response = Mock()
         mock_response.status_code = 200
         mock_patch.return_value = mock_response
+        self.channel_fetch.side_effect = [[1, 999], [1, 999], [1, 2]]
         
         # Try to add new valid stream
         stream_ids = [2]
@@ -224,6 +242,63 @@ class TestStreamValidation(unittest.TestCase):
         self.assertEqual(result, 1)
         
         # Verify that patch was called
+        mock_patch.assert_called_once()
+
+    @patch('api_utils.patch_request')
+    @patch('api_utils.get_udi_manager')
+    def test_update_preserves_valid_ids_missing_from_udi_cache(self, mock_get_udi, mock_patch):
+        from apps.core.api_utils import update_channel_streams
+
+        mock_get_udi.return_value.get_valid_stream_ids.return_value = {1}
+        self.authoritative_fetch.return_value = [1, 4]
+        mock_patch.return_value = Mock(status_code=204)
+        self.channel_fetch.return_value = [1, 4]
+
+        self.assertTrue(update_channel_streams(10, [1, 4], allow_dead_streams=True))
+        self.assertEqual(mock_patch.call_args.args[1]['streams'], [1, 4])
+        self.authoritative_fetch.assert_called_once()
+
+    @patch('api_utils.patch_request')
+    @patch('api_utils.get_udi_manager')
+    def test_update_refuses_write_when_missing_ids_cannot_be_verified(self, mock_get_udi, mock_patch):
+        from apps.core.api_utils import update_channel_streams
+
+        mock_get_udi.return_value.get_valid_stream_ids.return_value = {1}
+        self.authoritative_fetch.return_value = None
+
+        self.assertFalse(update_channel_streams(10, [1, 4], allow_dead_streams=True))
+        mock_patch.assert_not_called()
+
+    @patch('api_utils.patch_request')
+    @patch('api_utils.get_udi_manager')
+    def test_add_preserves_authoritatively_valid_uncached_current_id(self, mock_get_udi, mock_patch):
+        from apps.core.api_utils import add_streams_to_channel
+
+        udi = mock_get_udi.return_value
+        udi.get_valid_stream_ids.return_value = {1, 2}
+        udi.get_channel_by_id.return_value = {'id': 10, 'streams': [1, 4]}
+        udi.get_channel_streams.return_value = [{'id': 1}]
+        self.channel_fetch.return_value = [1, 4]
+        self.authoritative_fetch.return_value = [1, 2, 4]
+        mock_patch.return_value = Mock(status_code=204)
+        self.channel_fetch.side_effect = [[1, 4], [1, 4], [1, 4, 2]]
+
+        self.assertEqual(add_streams_to_channel(10, [2], allow_dead_streams=True), 1)
+        self.assertEqual(mock_patch.call_args.args[1]['streams'], [1, 4, 2])
+
+    @patch('api_utils.patch_request')
+    @patch('api_utils.get_udi_manager')
+    def test_add_reports_rejected_dispatcharr_patch(self, mock_get_udi, mock_patch):
+        from apps.core.api_utils import add_streams_to_channel
+
+        udi = mock_get_udi.return_value
+        udi.get_valid_stream_ids.return_value = {1, 2}
+        udi.get_channel_by_id.return_value = {'id': 10, 'streams': [1]}
+        udi.get_channel_streams.return_value = [{'id': 1}]
+        mock_patch.return_value = Mock(status_code=503)
+
+        with self.assertRaisesRegex(RuntimeError, 'Dispatcharr rejected stream assignment'):
+            add_streams_to_channel(10, [2], allow_dead_streams=True)
         mock_patch.assert_called_once()
 
 
@@ -277,6 +352,27 @@ class TestGetValidStreamIds(unittest.TestCase):
 
 class TestDeadStreamFiltering(unittest.TestCase):
     """Test that dead streams are filtered out during update/assign operations."""
+
+    @patch('apps.stream.dead_streams_tracker.DeadStreamsTracker')
+    @patch('api_utils.patch_request')
+    @patch('api_utils.get_udi_manager')
+    def test_dead_tracker_failure_refuses_channel_patch(
+        self, mock_get_udi, mock_patch, mock_tracker_cls
+    ):
+        from apps.core.api_utils import update_channel_streams
+
+        udi = mock_get_udi.return_value
+        udi.get_valid_stream_ids.return_value = {1}
+        udi.get_streams.return_value = [
+            {'id': 1, 'url': 'http://example.test/stream1.m3u8'},
+        ]
+        mock_tracker_cls.return_value.get_dead_stream_reasons.side_effect = RuntimeError(
+            'database unavailable'
+        )
+
+        with self.assertRaisesRegex(RuntimeError, 'Dead stream snapshot unavailable'):
+            update_channel_streams(1, [1])
+        mock_patch.assert_not_called()
     
     @patch('apps.stream.dead_streams_tracker.DeadStreamsTracker')
     @patch('api_utils.patch_request')
@@ -296,7 +392,9 @@ class TestDeadStreamFiltering(unittest.TestCase):
         mock_get_udi.return_value = mock_udi
         
         mock_tracker = MagicMock()
-        mock_tracker.is_offline.side_effect = lambda url: url == 'http://example.com/dead.m3u8'
+        mock_tracker.get_dead_stream_reasons.return_value = {
+            'http://example.com/dead.m3u8': 'offline',
+        }
         mock_tracker_cls.return_value = mock_tracker
         
         # Mock successful patch
@@ -306,7 +404,8 @@ class TestDeadStreamFiltering(unittest.TestCase):
         
         # Try to update with mix of live and dead streams
         stream_ids = [1, 2, 3]
-        result = update_channel_streams(1, stream_ids)
+        with patch('api_utils._fetch_authoritative_channel_stream_ids', return_value=[1, 2]):
+            result = update_channel_streams(1, stream_ids)
         
         # Verify success
         self.assertTrue(result)
@@ -329,7 +428,9 @@ class TestDeadStreamFiltering(unittest.TestCase):
         mock_get_udi.return_value = mock_udi
         
         mock_tracker = MagicMock()
-        mock_tracker.is_offline.side_effect = lambda url: url == 'http://example.com/dead.m3u8'
+        mock_tracker.get_dead_stream_reasons.return_value = {
+            'http://example.com/dead.m3u8': 'offline',
+        }
         mock_tracker_cls.return_value = mock_tracker
         
         # Mock successful patch
@@ -339,7 +440,8 @@ class TestDeadStreamFiltering(unittest.TestCase):
         
         # Try to update with allow_dead_streams=True (global check)
         stream_ids = [1, 2, 3]
-        result = update_channel_streams(1, stream_ids, allow_dead_streams=True)
+        with patch('api_utils._fetch_authoritative_channel_stream_ids', return_value=[1, 2, 3]):
+            result = update_channel_streams(1, stream_ids, allow_dead_streams=True)
         
         # Verify success
         self.assertTrue(result)
@@ -369,7 +471,9 @@ class TestDeadStreamFiltering(unittest.TestCase):
         mock_get_udi.return_value = mock_udi
         
         mock_tracker = MagicMock()
-        mock_tracker.is_offline.side_effect = lambda url: url == 'http://example.com/dead.m3u8'
+        mock_tracker.get_dead_stream_reasons.return_value = {
+            'http://example.com/dead.m3u8': 'offline',
+        }
         mock_tracker_cls.return_value = mock_tracker
         
         # Mock successful patch
@@ -379,7 +483,11 @@ class TestDeadStreamFiltering(unittest.TestCase):
         
         # Try to add mix of live and dead streams
         stream_ids = [2, 3]
-        result = add_streams_to_channel(1, stream_ids)
+        with patch(
+            'api_utils._fetch_authoritative_channel_stream_ids',
+            side_effect=[[1], [1], [1, 2]],
+        ):
+            result = add_streams_to_channel(1, stream_ids)
         
         # Verify only 1 stream was added (not the dead one)
         self.assertEqual(result, 1)

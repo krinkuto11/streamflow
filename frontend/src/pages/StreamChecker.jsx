@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
@@ -18,6 +18,7 @@ import { formatDuration } from '@/lib/time-format.js'
 import { getExternalStaleDiagnosticsDisplay } from '@/lib/external-stale-diagnostics-display.js'
 import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
 import { getCurrentProgressDisplay } from '@/lib/stream-checker-progress-display.js'
+import { loadStreamCheckerPoll } from '@/lib/stream-checker-poll.js'
 import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote, getHardwareRuntimeDeviceLabel } from '@/lib/hardware-status-display.js'
 import {
   getParallelProgressBadgeText,
@@ -76,22 +77,28 @@ export default function StreamChecker() {
   const [queueStartMode, setQueueStartMode] = useState('first')
   const [queueStartChannelId, setQueueStartChannelId] = useState('')
   const [queueStartInitialized, setQueueStartInitialized] = useState(false)
+  const activeCheckRef = useRef(false)
   const { toast } = useToast()
 
   useEffect(() => {
     loadData()
-    // Poll for updates - use shorter interval when checking is active
-    const pollInterval = (
-      status?.stream_checking_mode ||
-      status?.checking ||
-      (status?.queue?.queue_size > 0) ||
-      (status?.queue?.in_progress > 0)
-    ) ? 1000 : 3000
-    const interval = setInterval(() => {
-      loadData()
-    }, pollInterval)
-    return () => clearInterval(interval)
-  }, [status?.stream_checking_mode, status?.checking, status?.queue?.queue_size, status?.queue?.in_progress])
+    let stopped = false
+    let timer
+    const poll = async () => {
+      if (document.visibilityState === 'visible') await loadData(false)
+      if (!stopped) timer = setTimeout(poll, activeCheckRef.current ? 1000 : 5000)
+    }
+    timer = setTimeout(poll, 1000)
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void loadData(false)
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [])
 
   useEffect(() => {
     loadStartChannels()
@@ -101,34 +108,42 @@ export default function StreamChecker() {
   // The tick value itself is never rendered — it triggers re-renders so
   // each countdown cell recalculates from Date.now() fresh each second.
   useEffect(() => {
+    if (!(status?.stream_checking_mode || status?.checking || status?.queue?.queue_size > 0 || status?.queue?.in_progress > 0)) return undefined
     const timer = setInterval(() => setTick(t => t + 1), 1000)
     return () => clearInterval(timer)
-  }, [])
+  }, [status?.stream_checking_mode, status?.checking, status?.queue?.queue_size, status?.queue?.in_progress])
 
-  const loadData = async () => {
+  const loadData = async (includeSettings = true) => {
     try {
-      const [statusResponse, progressResponse, configResponse, hardwareStatusResponse] = await Promise.all([
-        streamCheckerAPI.getStatus(),
-        streamCheckerAPI.getProgress(),
-        streamCheckerAPI.getConfig(),
-        streamCheckerAPI.getHardwareStatus()
-      ])
-      setStatus(statusResponse.data)
-      setProgress(progressResponse.data)
-      setConfig(configResponse.data)
-      setHardwareStatus(hardwareStatusResponse.data)
-      if (!editedConfig && configResponse.data) {
-        setEditedConfig(configResponse.data)
+      const { statusResult, progressResult, configResult, hardwareResult } =
+        await loadStreamCheckerPoll(streamCheckerAPI, includeSettings)
+      if (statusResult.status === 'fulfilled') {
+        const latestStatus = statusResult.value.data
+        setStatus(latestStatus)
+        activeCheckRef.current = Boolean(
+          latestStatus?.stream_checking_mode || latestStatus?.checking
+          || latestStatus?.queue?.queue_size > 0 || latestStatus?.queue?.in_progress > 0
+        )
       }
-      if (!queueStartInitialized && configResponse.data?.queue) {
-        const savedMode = configResponse.data.queue.start_mode || 'first'
-        const savedChannelId = configResponse.data.queue.start_channel_id
+      if (progressResult.status === 'fulfilled') setProgress(progressResult.value.data)
+      if (configResult?.status === 'fulfilled') {
+        const nextConfig = configResult.value.data
+        setConfig(nextConfig)
+        setEditedConfig(previous => previous ?? nextConfig)
+      }
+      if (hardwareResult?.status === 'fulfilled') setHardwareStatus(hardwareResult.value.data)
+      if (!queueStartInitialized && configResult?.status === 'fulfilled' && configResult.value.data?.queue) {
+        const savedMode = configResult.value.data.queue.start_mode || 'first'
+        const savedChannelId = configResult.value.data.queue.start_channel_id
         setQueueStartMode(savedMode)
         if (savedChannelId !== null && savedChannelId !== undefined) {
           setQueueStartChannelId(String(savedChannelId))
         }
         setQueueStartInitialized(true)
       }
+      const failed = [statusResult, progressResult, configResult, hardwareResult]
+        .filter(result => result?.status === 'rejected')
+      if (failed.length > 0) console.warn('Stream checker data partially unavailable:', failed.map(result => result.reason))
     } catch (err) {
       console.error('Failed to load stream checker data:', err)
     } finally {

@@ -325,6 +325,65 @@ def test_concurrent_channel_empty_inventory_allows_only_custom_streams(
     assert limiter.profile_reservations_by_token == {}
 
 
+def test_concurrent_channel_rejected_write_back_fails_check():
+    from apps.stream.stream_checker_service import StreamCheckerService
+
+    channel_id = 111
+    stream = {
+        'id': 1903,
+        'name': 'Write-back guarded stream',
+        'url': 'http://stream.invalid/live/1903.ts',
+        'is_custom': True,
+        'stream_stats': {},
+    }
+    udi = _make_bitrate_runtime_udi(channel_id, [stream])
+    udi.get_m3u_accounts.return_value = []
+    automation_config = MagicMock()
+    automation_config.get_profile.return_value = None
+    automation_config.get_effective_configuration.return_value = {
+        'profile': None,
+        'periods': [],
+    }
+    service = StreamCheckerService()
+    _configure_bitrate_runtime_service(
+        service,
+        {'channels': {}, 'last_global_check': None},
+    )
+    service._check_channel_limits = Mock(return_value=None)
+    service.progress.update = Mock(return_value=True)
+    analysis = {
+        'stream_id': stream['id'],
+        'stream_name': stream['name'],
+        'stream_url': stream['url'],
+        'status': 'OK',
+        'resolution': '1920x1080',
+        'bitrate_kbps': 4000,
+        'fps': 25,
+        'video_codec': 'h264',
+        'audio_codec': 'aac',
+    }
+
+    with (
+        patch('apps.stream.stream_checker_service.get_udi_manager', return_value=udi),
+        patch(
+            'apps.stream.stream_checker_service.get_automation_config_manager',
+            return_value=automation_config,
+        ),
+        patch('apps.stream.stream_checker_service.fetch_channel_streams', return_value=[stream]),
+        patch('apps.stream.stream_checker_service.analyze_stream', return_value=analysis),
+        patch('apps.stream.stream_checker_service.batch_update_stream_stats', return_value=(1, 0)),
+        patch('apps.stream.stream_checker_service.update_channel_streams', return_value=False) as writer,
+        patch('apps.stream.stream_checker_service._get_base_url', return_value='http://localhost:9191'),
+    ):
+        result = service._check_channel_concurrent(channel_id, force_check_override=False)
+
+    writer.assert_called_once()
+    assert result['success'] is False
+    assert 'Dispatcharr rejected stream assignment' in result['error']
+    service.check_queue.mark_failed.assert_called_once()
+    service.check_queue.mark_completed.assert_not_called()
+
+
 class TestConcurrentLimiterIntegration(unittest.TestCase):
     """Integration test for concurrent stream limiter."""
     

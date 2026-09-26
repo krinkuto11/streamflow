@@ -342,33 +342,33 @@ export function TimelineControl({ minTime, maxTime, currentTime, onTimeChange, i
     const viewportWidth = getXPosition(currentTime) - viewportX;
 
     return (
-        <Card className={`border-t sticky bottom-0 z-50 bg-zinc-950/95 backdrop-blur shadow-[0_-4px_10px_rgba(0,0,0,0.5)] ${className || ''}`}>
-            <div className="flex flex-row">
-                <div className="flex-1 flex flex-col">
-                    <div className="flex items-center justify-between px-4 py-1.5 border-b border-white/5 bg-zinc-900/50">
-                        <div className="flex items-center gap-3">
-                            <div className="flex items-center bg-zinc-800/50 rounded-md border border-white/5 px-2 py-0.5">
-                                <span className={`text-[10px] font-bold mr-2 ${isLive ? 'text-red-500 animate-pulse' : 'text-zinc-500'}`}>
+        <Card className={`min-w-0 border-t sticky bottom-16 z-30 bg-card/95 backdrop-blur shadow-lg lg:bottom-0 ${className || ''}`}>
+            <div className="flex min-w-0 flex-row">
+                <div className="flex min-w-0 flex-1 flex-col">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/50 px-3 py-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                            <div className="flex min-h-11 items-center rounded-md border bg-muted px-2 py-0.5">
+                                <span className={`text-[10px] font-bold mr-2 ${isLive ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'}`}>
                                     {isLive ? 'LIVE' : 'REC'}
                                 </span>
-                                <span className="font-mono text-xs tabular-nums text-white/90">
+                                <span className="font-mono text-xs tabular-nums text-foreground">
                                     {formatTime(currentTime)}
                                 </span>
                             </div>
                             {!isLive && (
-                                <Button variant="ghost" size="sm" className="h-6 text-[10px] gap-1 hover:text-primary hover:bg-primary/10" onClick={onLiveClick}>
+                                <Button variant="ghost" size="sm" className="min-h-11 text-xs gap-1 hover:text-primary hover:bg-primary/10" onClick={onLiveClick}>
                                     <SkipForward className="h-3 w-3" /> Return to Live
                                 </Button>
                             )}
                         </div>
                         <div className="flex items-center gap-1">
-                            <Button variant="secondary" size="icon" className="h-7 w-7 rounded-full bg-zinc-800 hover:bg-zinc-700" onClick={() => setIsPlaying(!isPlaying)}>
+                            <Button variant="secondary" size="icon" className="h-11 w-11 rounded-full" aria-label={isPlaying ? "Pause timeline playback" : "Play timeline history"} onClick={() => setIsPlaying(!isPlaying)}>
                                 {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
                             </Button>
                         </div>
-                        <div className="flex items-center gap-2 min-w-[200px] justify-end">
+                        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
                             {hoveredStreamId && (
-                                <div className="text-[11px] font-medium text-primary bg-primary/10 px-2 py-0.5 rounded border border-primary/20 animate-in fade-in slide-in-from-right-2">
+                                <div className="hidden max-w-48 truncate text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded border border-primary/20 sm:block">
                                     {streams.find(s => s.stream_id === hoveredStreamId)?.name || 'Stream'}
                                 </div>
                             )}
@@ -376,13 +376,17 @@ export function TimelineControl({ minTime, maxTime, currentTime, onTimeChange, i
                                 variant="ghost"
                                 size="sm"
                                 onClick={onToggleTimeline}
-                                className="h-7 text-[10px] text-zinc-400 hover:text-white hover:bg-white/10 flex items-center gap-1"
+                                className="min-h-11 text-xs text-muted-foreground flex items-center gap-1"
                             >
                                 Hide Timeline <ChevronDown className="h-3 w-3" />
                             </Button>
                         </div>
                     </div>
 
+                    <label className="flex min-w-0 items-center gap-3 border-b px-3 text-xs text-muted-foreground">
+                        <span className="shrink-0">Position</span>
+                        <input type="range" aria-label="Timeline position" min={minTime} max={Math.max(minTime + 1, maxTime)} step="1" value={Math.max(minTime, Math.min(currentTime, maxTime))} onChange={event => { setIsPlaying(false); onTimeChange(Number(event.target.value)); }} className="h-11 min-w-0 flex-1 accent-primary" />
+                    </label>
                     <div ref={containerRef} className="relative h-[210px] w-full cursor-crosshair select-none overflow-hidden bg-black" onMouseDown={handleMouseDown}>
                         {/* Ruler */}
                         <div className="absolute top-0 left-0 right-0 h-[30px] border-b border-white/10 bg-zinc-900/90 backdrop-blur-sm z-20">
@@ -529,12 +533,12 @@ export function TimelineControl({ minTime, maxTime, currentTime, onTimeChange, i
                     </div>
                 </div>
 
-                <div className="w-12 border-l border-white/5 bg-zinc-900 flex flex-col items-center justify-center py-2 gap-2">
-                    <span className="text-[8px] text-zinc-500 font-black tracking-tighter uppercase whitespace-nowrap">Scale</span>
+                <div className="flex w-11 shrink-0 flex-col items-center justify-center gap-2 border-l bg-muted py-2">
+                    <span className="text-[8px] text-muted-foreground font-black tracking-tighter uppercase whitespace-nowrap">Scale</span>
                     <div className="h-40 py-2">
-                        <Slider orientation="vertical" min={0} max={zoomLevels.length - 1} step={1} value={[currentZoomIndex]} onValueChange={handleZoomChange} className="h-full" />
+                        <Slider aria-label="Timeline time scale" orientation="vertical" min={0} max={zoomLevels.length - 1} step={1} value={[currentZoomIndex]} onValueChange={handleZoomChange} className="h-full" />
                     </div>
-                    <span className="text-[9px] font-mono text-zinc-400 w-full text-center truncate px-0.5">
+                    <span className="text-[9px] font-mono text-muted-foreground w-full text-center truncate px-0.5">
                         {zoomLevels[currentZoomIndex] < 60 ? `${zoomLevels[currentZoomIndex]}s` : `${Math.round(zoomLevels[currentZoomIndex] / 60)}m`}
                     </span>
                 </div>

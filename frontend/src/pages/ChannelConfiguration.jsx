@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Input } from '@/components/ui/input.jsx'
@@ -18,6 +18,8 @@ import { CheckCircle, Edit, Plus, Trash2, Loader2, Search, X, Download, Upload, 
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip.jsx'
+import { REGEX_TABLE_GRID_COLS } from '@/components/channel-configuration/patternUtils.js'
+import { ChannelPagination } from '@/components/channel-configuration/ChannelPagination.jsx'
 import { RegexTableRow } from '@/components/channel-configuration/RegexTableRow.jsx'
 import { SortableChannelItem } from '@/components/channel-configuration/SortableChannelItem.jsx'
 import {
@@ -45,9 +47,6 @@ import {
 // Constants for localStorage keys
 const CHANNEL_STATS_PREFIX = 'streamflow_channel_stats_'
 const CHANNEL_LOGO_PREFIX = 'streamflow_channel_logo_'
-
-// Constants for grid layout
-const REGEX_TABLE_GRID_COLS = '32px 60px 48px 2fr 3fr 100px 80px 140px'
 
 // Constants for stream checker priorities
 
@@ -450,6 +449,7 @@ export default function ChannelConfiguration() {
 
   const [pendingChanges, setPendingChanges] = useState({})
   const [activeTab, setActiveTab] = useState('regex')
+  const [matchCountStates, setMatchCountStates] = useState({})
   const [matchCounts, setMatchCounts] = useState({})        // {channelId: matchCount}
   const [totalStreamCount, setTotalStreamCount] = useState(null)
 
@@ -488,7 +488,7 @@ export default function ChannelConfiguration() {
 
   // Group Configuration state
   const [groupsConfig, setGroupsConfig] = useState({}) // {groupId: {profileId, periods: [{id, profile_id}]}}
-  const [loadingGroupsConfig, setLoadingGroupsConfig] = useState(false)
+  const [loadingGroupsConfig, setLoadingGroupsConfig] = useState(true)
   const [groupAssignProfileDialogOpen, setGroupAssignProfileDialogOpen] = useState(false)
   const [groupAssignPeriodsDialogOpen, setGroupAssignPeriodsDialogOpen] = useState(false)
   const [groupAssignMatchingDialogOpen, setGroupAssignMatchingDialogOpen] = useState(false)
@@ -530,8 +530,63 @@ export default function ChannelConfiguration() {
   // Active profile cache — keyed by channel ID; populated eagerly when paginatedChannels changes.
   // Stays alive across page navigation so re-visiting a page doesn't re-fetch.
   // Values: undefined = not yet fetched | null = in flight | { error } | { automation, epg_override }
+  const channelLoadRequestRef = useRef(null)
+  const groupsLoadRequestRef = useRef(null)
   const activeProfilesRef = useRef({})
+  const activeProfileRequestsRef = useRef({})
   const [activeProfiles, setActiveProfiles] = useState({})
+
+  // Filter channels based on search query and group filter
+  // Use orderedChannels as the base to ensure consistent ordering between tabs
+  const groupsById = useMemo(() => new Map(groups.map(group => [String(group.id), group])), [groups])
+  const filteredChannels = useMemo(() => orderedChannels.filter(channel => {
+    // Apply group filter
+    if (filterByGroup !== 'all' && channel.channel_group_id !== parseInt(filterByGroup)) {
+      return false
+    }
+
+    // Then apply search filter
+    if (!searchQuery.trim()) return true
+
+    const query = searchQuery.toLowerCase()
+    const channelName = (channel.name || '').toLowerCase()
+    const channelNumber = channel.channel_number ? String(channel.channel_number) : ''
+    const channelId = String(channel.id)
+
+    // Get group name for search
+    const group = groupsById.get(String(channel.channel_group_id))
+    const groupName = group ? group.name.toLowerCase() : ''
+
+    return channelName.includes(query) ||
+      channelNumber.includes(query) ||
+      channelId.includes(query) ||
+      groupName.includes(query)
+  }), [orderedChannels, filterByGroup, searchQuery, groupsById])
+
+  // Sort by group if enabled
+  const displayChannels = useMemo(() => sortByGroup
+    ? [...filteredChannels].sort((a, b) => {
+      const groupA = groupsById.get(String(a.channel_group_id))?.name || ''
+      const groupB = groupsById.get(String(b.channel_group_id))?.name || ''
+      return groupA.localeCompare(groupB) || (a.channel_number || 0) - (b.channel_number || 0)
+    })
+    : filteredChannels, [filteredChannels, sortByGroup, groupsById])
+
+  // Filter ordered channels - simplify since group visibility is removed
+  const visibleOrderedChannels = orderedChannels
+
+  // Calculate pagination for Regex Configuration
+  const totalPages = Math.ceil(displayChannels.length / itemsPerPage)
+  const startIndex = (currentPage - 1) * itemsPerPage
+  const endIndex = startIndex + itemsPerPage
+  const paginatedChannels = useMemo(() => displayChannels.slice(startIndex, endIndex), [displayChannels, startIndex, endIndex])
+
+  // Calculate pagination for Channel Order
+  const orderTotalPages = Math.ceil(visibleOrderedChannels.length / orderItemsPerPage)
+  const orderStartIndex = (orderCurrentPage - 1) * orderItemsPerPage
+  const orderEndIndex = orderStartIndex + orderItemsPerPage
+  const paginatedOrderedChannels = visibleOrderedChannels.slice(orderStartIndex, orderEndIndex)
+
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -545,10 +600,10 @@ export default function ChannelConfiguration() {
   }, [])
 
   useEffect(() => {
-    if (activeTab === 'groups' && groups.length > 0) {
-      loadGroupsConfig()
-    }
-  }, [activeTab, groups])
+    if (loading) return
+    if (groups.length > 0) loadGroupsConfig()
+    else setLoadingGroupsConfig(false)
+  }, [groups, loading])
 
   useEffect(() => {
     if (groups.length === 0 || selectedGroups.size === 0) return
@@ -559,8 +614,16 @@ export default function ChannelConfiguration() {
   // Bulk match count — fires when Regex tab is active, on page change, pattern edits,
   // or after groupsConfig populates (so group-inherited channels get their counts too).
   useEffect(() => {
-    if (activeTab !== 'regex' || channels.length === 0) return
+    if (activeTab !== 'regex' || loading || loadingGroupsConfig || paginatedChannels.length === 0) return
 
+    let cancelled = false
+    const visibleIds = paginatedChannels.map(channel => String(channel.id))
+    setMatchCountStates(previous => ({ ...previous, ...Object.fromEntries(visibleIds.map(id => [id, 'loading'])) }))
+    setMatchCounts(previous => {
+      const next = { ...previous }
+      visibleIds.forEach(id => { delete next[id] })
+      return next
+    })
     const fetchMatchCounts = async () => {
       // Build effective config for each channel on the current page,
       // mirroring the global mode logic in handleTestPattern.
@@ -613,28 +676,37 @@ export default function ChannelConfiguration() {
         })
       }
 
+      const requestedIds = new Set(channelConfigs.map(config => String(config.channel_id)))
+      const skipped = Object.fromEntries(paginatedChannels.filter(channel => !requestedIds.has(String(channel.id))).map(channel => {
+        const groupId = channel.group_id ?? channel.channel_group_id
+        return [String(channel.id), groupId && !groupsConfig[groupId] ? 'unavailable' : 'not_configured']
+      }))
+      setMatchCountStates(previous => ({ ...previous, ...skipped }))
       if (channelConfigs.length === 0) return
 
       try {
         const response = await regexAPI.bulkMatchCounts({ channels: channelConfigs })
+        if (cancelled) return
         const { counts, total_streams } = response.data
         setMatchCounts(prev => ({ ...prev, ...counts }))
+        setMatchCountStates(previous => ({ ...previous, ...Object.fromEntries([...requestedIds].map(id => [id, counts?.[id] !== undefined ? 'ready' : 'unavailable'])) }))
         if (total_streams != null) setTotalStreamCount(total_streams)
       } catch (err) {
+        if (cancelled) return
+        setMatchCountStates(previous => ({ ...previous, ...Object.fromEntries([...requestedIds].map(id => [id, 'unavailable'])) }))
         console.error('Failed to fetch bulk match counts:', err)
       }
     }
 
     fetchMatchCounts()
-  // paginatedChannels is derived — listing its deps individually avoids stale closure
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, currentPage, patterns, groupsConfig, channels])
+    return () => { cancelled = true }
+  }, [activeTab, loading, loadingGroupsConfig, paginatedChannels, patterns, groupsConfig])
 
   // Eager active-profile fetch — fires when the visible page of channels changes on the
   // Regex tab. Skips channels already in the cache (ref survives pagination navigation).
-  // Sets null (in-flight) immediately so the cell shows muted '—' while loading.
+  // Sets null (in-flight) immediately so the cell shows Loading profile rather than '—' while loading.
   useEffect(() => {
-    if (activeTab !== 'regex' || channels.length === 0) return
+    if (activeTab !== 'regex' || loading || loadingGroupsConfig || paginatedChannels.length === 0) return
 
     const channelsToFetch = paginatedChannels.filter(
       ch => !(String(ch.id) in activeProfilesRef.current)
@@ -649,25 +721,31 @@ export default function ChannelConfiguration() {
 
     channelsToFetch.forEach(async (ch) => {
       const key = String(ch.id)
+      const request = Symbol(key)
+      activeProfileRequestsRef.current[key] = request
       try {
         const res = await channelsAPI.getChannelActiveProfile(ch.id)
+        if (activeProfileRequestsRef.current[key] !== request) return
         activeProfilesRef.current[key] = res.data
       } catch {
+        if (activeProfileRequestsRef.current[key] !== request) return
         activeProfilesRef.current[key] = { error: true }
       }
       // Update state with a fresh copy of the ref so React re-renders the affected row
       setActiveProfiles({ ...activeProfilesRef.current })
     })
-  // paginatedChannels is derived — list primitive deps to avoid stale closure
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, currentPage, channels])
+  }, [activeTab, loading, loadingGroupsConfig, paginatedChannels, groupsConfig])
 
   const loadData = async () => {
+    const request = Symbol('channels')
+    channelLoadRequestRef.current = request
     try {
       setLoading(true)
+      setLoadingGroupsConfig(true)
 
       // Load all channels directly
       const channelsResponse = await channelsAPI.getChannels()
+      if (channelLoadRequestRef.current !== request) return
       const channelsToLoad = channelsResponse.data || []
 
       const [patternsResponse, groupsResponse, orderResponse, m3uAccountsResponse, profilesResponse] = await Promise.all([
@@ -678,6 +756,7 @@ export default function ChannelConfiguration() {
         automationAPI.getProfiles().catch(() => ({ data: [] }))
       ])
 
+      if (channelLoadRequestRef.current !== request) return
       setChannels(channelsToLoad)
       setPatterns(patternsResponse.data.patterns || {})
       setGroups(groupsResponse.data || [])
@@ -730,8 +809,10 @@ export default function ChannelConfiguration() {
 
       // Clear active profile cache so fresh data is fetched for the new channel list
       activeProfilesRef.current = {}
+      activeProfileRequestsRef.current = {}
       setActiveProfiles({})
     } catch (err) {
+      if (channelLoadRequestRef.current !== request) return
       console.error('Failed to load data:', err)
       toast({
         title: "Error",
@@ -739,7 +820,7 @@ export default function ChannelConfiguration() {
         variant: "destructive"
       })
     } finally {
-      setLoading(false)
+      if (channelLoadRequestRef.current === request) setLoading(false)
     }
   }
 
@@ -995,11 +1076,18 @@ export default function ChannelConfiguration() {
 
   const loadGroupsConfig = async () => {
     if (groups.length === 0) return
+    const request = Symbol('groups')
+    groupsLoadRequestRef.current = request
     try {
       setLoadingGroupsConfig(true)
       const summaryResponse = await automationAPI.getGroupConfigSummary()
+      if (groupsLoadRequestRef.current !== request) return
+      activeProfilesRef.current = {}
+      activeProfileRequestsRef.current = {}
+      setActiveProfiles({})
       setGroupsConfig(normalizeGroupConfigSummary(groups, summaryResponse.data || {}))
     } catch (err) {
+      if (groupsLoadRequestRef.current !== request) return
       console.error('Failed to load groups config:', err)
       toast({
         title: "Error",
@@ -1007,7 +1095,7 @@ export default function ChannelConfiguration() {
         variant: "destructive"
       })
     } finally {
-      setLoadingGroupsConfig(false)
+      if (groupsLoadRequestRef.current === request) setLoadingGroupsConfig(false)
     }
   }
 
@@ -1266,13 +1354,19 @@ export default function ChannelConfiguration() {
 
       // Refresh the resolved profile line in the open row immediately after save.
       const activeProfileKey = String(channelId)
+      const request = Symbol(activeProfileKey)
+      activeProfileRequestsRef.current[activeProfileKey] = request
       activeProfilesRef.current = { ...activeProfilesRef.current, [activeProfileKey]: null }
       setActiveProfiles({ ...activeProfilesRef.current })
       try {
         const res = await channelsAPI.getChannelActiveProfile(channelId)
-        activeProfilesRef.current = { ...activeProfilesRef.current, [activeProfileKey]: res.data }
+        if (activeProfileRequestsRef.current[activeProfileKey] === request) {
+          activeProfilesRef.current = { ...activeProfilesRef.current, [activeProfileKey]: res.data }
+        }
       } catch {
-        activeProfilesRef.current = { ...activeProfilesRef.current, [activeProfileKey]: { error: true } }
+        if (activeProfileRequestsRef.current[activeProfileKey] === request) {
+          activeProfilesRef.current = { ...activeProfilesRef.current, [activeProfileKey]: { error: true } }
+        }
       }
       setActiveProfiles({ ...activeProfilesRef.current })
 
@@ -2087,57 +2181,6 @@ export default function ChannelConfiguration() {
     setExpandedRowId(prevId => prevId === channelId ? null : channelId)
   }
 
-  // Filter channels based on search query and group filter
-  // Use orderedChannels as the base to ensure consistent ordering between tabs
-  const filteredChannels = orderedChannels.filter(channel => {
-    // Apply group filter
-    if (filterByGroup !== 'all' && channel.channel_group_id !== parseInt(filterByGroup)) {
-      return false
-    }
-
-    // Then apply search filter
-    if (!searchQuery.trim()) return true
-
-    const query = searchQuery.toLowerCase()
-    const channelName = (channel.name || '').toLowerCase()
-    const channelNumber = channel.channel_number ? String(channel.channel_number) : ''
-    const channelId = String(channel.id)
-
-    // Get group name for search
-    const group = groups.find(g => g.id === channel.channel_group_id)
-    const groupName = group ? group.name.toLowerCase() : ''
-
-    return channelName.includes(query) ||
-      channelNumber.includes(query) ||
-      channelId.includes(query) ||
-      groupName.includes(query)
-  })
-
-  // Sort by group if enabled
-  const displayChannels = sortByGroup
-    ? [...filteredChannels].sort((a, b) => {
-      const groupA = groups.find(g => g.id === a.channel_group_id)?.name || ''
-      const groupB = groups.find(g => g.id === b.channel_group_id)?.name || ''
-      return groupA.localeCompare(groupB) || (a.channel_number || 0) - (b.channel_number || 0)
-    })
-    : filteredChannels
-
-  // Filter ordered channels - simplify since group visibility is removed
-  const visibleOrderedChannels = orderedChannels
-
-  // Calculate pagination for Regex Configuration
-  const totalPages = Math.ceil(displayChannels.length / itemsPerPage)
-  const startIndex = (currentPage - 1) * itemsPerPage
-  const endIndex = startIndex + itemsPerPage
-  const paginatedChannels = displayChannels.slice(startIndex, endIndex)
-
-  // Calculate pagination for Channel Order
-  const orderTotalPages = Math.ceil(visibleOrderedChannels.length / orderItemsPerPage)
-  const orderStartIndex = (orderCurrentPage - 1) * orderItemsPerPage
-  const orderEndIndex = orderStartIndex + orderItemsPerPage
-  const paginatedOrderedChannels = visibleOrderedChannels.slice(orderStartIndex, orderEndIndex)
-
-
   // Reset to first page when search changes
   useEffect(() => {
     setCurrentPage(1)
@@ -2317,37 +2360,40 @@ export default function ChannelConfiguration() {
 
   return (
     <TooltipProvider>
-      <div className="space-y-6">
+      <div className="space-y-4 sm:space-y-6">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Channel Configuration</h1>
+          <div className="mb-2 hidden text-[11px] font-bold uppercase tracking-[0.16em] text-primary sm:block">Organize</div>
+          <h1 className="text-3xl font-bold tracking-tight">Channels</h1>
           <p className="text-muted-foreground">
-            View and manage channel regex patterns, settings, and ordering
+            Checks, streams, and automation.
           </p>
         </div>
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="regex">Regex Configuration</TabsTrigger>
-            <TabsTrigger value="ordering">Channel Order</TabsTrigger>
-            <TabsTrigger value="groups">Group Configuration</TabsTrigger>
+          <TabsList className="grid h-auto w-full grid-cols-3 gap-1 p-1 sm:flex sm:flex-wrap sm:justify-start">
+            <TabsTrigger value="regex" className="min-h-11 min-w-0 px-2 sm:min-h-0 sm:px-3">Channels</TabsTrigger>
+            <TabsTrigger value="ordering" className="min-h-11 min-w-0 px-2 sm:min-h-0 sm:px-3">Channel Order</TabsTrigger>
+            <TabsTrigger value="groups" className="min-h-11 min-w-0 px-2 sm:min-h-0 sm:px-3">Groups</TabsTrigger>
           </TabsList>
 
-          <TabsContent value="regex" className="space-y-6">
-            {/* Search Bar and Export/Import Buttons */}
-            <div className="flex items-center gap-2">
-              <div className="relative flex-1 max-w-md">
+          <TabsContent value="regex" className="space-y-3">
+            {/* Search and profile context */}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative min-w-0 flex-1 sm:max-w-md">
                 <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
                   type="text"
-                  placeholder="Search channels by name, number, or ID..."
+                  aria-label="Search channels"
+                  placeholder="Search channels..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-10 pr-10"
+                  className="h-11 pl-10 pr-10 sm:h-10"
                 />
-                {searchQuery && (
+              {searchQuery && (
                   <Button
                     variant="ghost"
                     size="sm"
+                    aria-label="Clear channel search"
                     className="absolute right-1 top-1/2 transform -translate-y-1/2 h-7 w-7 p-0"
                     onClick={clearSearch}
                   >
@@ -2355,6 +2401,29 @@ export default function ChannelConfiguration() {
                   </Button>
                 )}
               </div>
+                    <div className="flex w-32 min-w-0 items-center gap-2 sm:w-60">
+                    <div className="min-w-0 flex-1">
+                      <Label htmlFor="group-filter" className="sr-only">Filter by group</Label>
+                      <Select value={filterByGroup} onValueChange={setFilterByGroup}>
+                        <SelectTrigger id="group-filter" className="h-11 w-full sm:h-10">
+                          <SelectValue placeholder="Group" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All Groups</SelectItem>
+                          {groups.map(group => (
+                            <SelectItem key={group.id} value={String(group.id)}>
+                              {group.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {selectedChannels.size > 0 && (
+                      <Badge variant="secondary" className="mb-1 whitespace-nowrap text-xs">
+                        {selectedChannels.size} selected
+                      </Badge>
+                    )}
+                  </div>
               {searchQuery && (
                 <Badge variant="secondary">
                   {filteredChannels.length} of {channels.length} channels
@@ -2382,233 +2451,213 @@ export default function ChannelConfiguration() {
                 </Tooltip>
               )}
 
-              {/* Export/Import Buttons */}
-              <div className="flex items-center gap-2 ml-auto">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleExportPatterns}
-                >
-                  <Download className="h-4 w-4 mr-2" />
-                  Export Regex
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => document.getElementById('import-file-input').click()}
-                >
-                  <Upload className="h-4 w-4 mr-2" />
-                  Import Regex
-                </Button>
-                <input
-                  id="import-file-input"
-                  type="file"
-                  accept=".json"
-                  onChange={handleImportPatterns}
-                  style={{ display: 'none' }}
-                />
-              </div>
             </div>
 
-            <div className="space-y-4">
-              {/* Filter and Action Bar */}
-              <Card>
-                <CardContent className="p-4">
-                  <div className="flex flex-wrap items-center gap-6">
-                    {/* Section: Sorting */}
-                    <div className="flex items-center gap-4">
-                      <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Sorting</div>
-                      <div className="flex items-center gap-2">
-                        <Select value={filterByGroup} onValueChange={setFilterByGroup}>
-                          <SelectTrigger id="group-filter" className="h-8 w-[140px]">
-                            <SelectValue placeholder="Group" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="all">All Groups</SelectItem>
-                            {groups.map(group => (
-                              <SelectItem key={group.id} value={String(group.id)}>
-                                {group.name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+            <div className="space-y-3">
+              {/* Group filter stays visible; bulk and maintenance actions stay available on demand. */}
+              <div>
+                <div>
+                  <details className="group">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-md py-2 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+                      <span className="min-w-0">
+                        <span>Channel tools <span className="hidden font-normal text-muted-foreground sm:inline">/ Bulk actions, import and export</span></span>
+                      </span>
+                      <ChevronDown aria-hidden="true" className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" />
+                    </summary>
+                    <div className="space-y-4 border-t p-3 sm:p-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button variant="outline" size="sm" onClick={handleExportPatterns} className="min-h-11 sm:min-h-0">
+                          <Download className="h-4 w-4" /> Export Regex
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={() => document.getElementById('import-file-input').click()} className="min-h-11 sm:min-h-0">
+                          <Upload className="h-4 w-4" /> Import Regex
+                        </Button>
+                        <input id="import-file-input" type="file" accept=".json" onChange={handleImportPatterns} className="sr-only" tabIndex={-1} />
                       </div>
+                      <div className="flex flex-wrap items-center gap-4 sm:gap-6">
+                        {/* Section: Sorting */}
+                        <div className="flex flex-wrap items-center gap-3">
+                          <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Sorting</div>
+                          <div className="flex items-center gap-2">
+                            <Checkbox
+                              id="sort-by-group"
+                              checked={sortByGroup}
+                              onCheckedChange={setSortByGroup}
+                            />
+                            <Label htmlFor="sort-by-group" className="text-xs whitespace-nowrap cursor-pointer">
+                              Sort by Group
+                            </Label>
+                          </div>
+                        </div>
 
-                      <div className="flex items-center gap-2">
-                        <Checkbox
-                          id="sort-by-group"
-                          checked={sortByGroup}
-                          onCheckedChange={setSortByGroup}
-                        />
-                        <Label htmlFor="sort-by-group" className="text-xs whitespace-nowrap cursor-pointer">
-                          Sort by Group
-                        </Label>
-                      </div>
-                    </div>
-
-                    {/* Section: Matching */}
-                    <div className="flex items-center gap-3">
-                      <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Matching</div>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => setBulkDialogOpen(true)}
-                            disabled={selectedChannels.size === 0}
-                            className="h-8 w-8 p-0"
-                          >
-                            <Plus className="h-4 w-4" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent><p>Add Regex</p></TooltipContent>
-                      </Tooltip>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={handleBulkHealthCheck}
-                            disabled={selectedChannels.size === 0 || bulkCheckingChannels}
-                            className="h-8 w-8 p-0 text-blue-600 dark:text-green-500 border-blue-600 dark:border-green-500"
-                          >
-                            {bulkCheckingChannels ? <Loader2 className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />}
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent><p>Health Check</p></TooltipContent>
-                      </Tooltip>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={handleOpenEditCommon}
-                            disabled={selectedChannels.size === 0}
-                            className="h-8 w-8 p-0"
-                          >
-                            <Edit2 className="h-4 w-4" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent><p>Mass Regex Edit</p></TooltipContent>
-                      </Tooltip>
-
-                      <DropdownMenu>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="outline" size="sm" disabled={selectedChannels.size === 0} className="h-8 w-10 px-0 font-bold text-xs ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
-                                ID
+                        {/* Section: Matching */}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Matching</div>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => setBulkDialogOpen(true)}
+                                disabled={selectedChannels.size === 0}
+                                className="h-11 gap-1 px-2 sm:h-8 sm:w-8 sm:p-0"
+                              >
+                                <Plus className="h-4 w-4" />
+                                <span className="text-xs sm:sr-only">Add Regex</span>
                               </Button>
-                            </DropdownMenuTrigger>
-                          </TooltipTrigger>
-                          <TooltipContent>Match Settings</TooltipContent>
-                        </Tooltip>
-                        <DropdownMenuContent>
-                          <DropdownMenuLabel>Match by TVG-ID</DropdownMenuLabel>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem onClick={() => handleBulkMatchSettings(true)}>Enable</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => handleBulkMatchSettings(false)}>Disable</DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
+                            </TooltipTrigger>
+                            <TooltipContent><p>Add Regex</p></TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={handleBulkHealthCheck}
+                                disabled={selectedChannels.size === 0 || bulkCheckingChannels}
+                                className="h-11 gap-1 px-2 text-blue-600 border-blue-600 dark:text-green-500 dark:border-green-500 sm:h-8 sm:w-8 sm:p-0"
+                              >
+                                {bulkCheckingChannels ? <Loader2 className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />}
+                                <span className="text-xs sm:sr-only">Health Check</span>
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent><p>Health Check</p></TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={handleOpenEditCommon}
+                                disabled={selectedChannels.size === 0}
+                                className="h-11 gap-1 px-2 sm:h-8 sm:w-8 sm:p-0"
+                              >
+                                <Edit2 className="h-4 w-4" />
+                                <span className="text-xs sm:sr-only">Mass Regex Edit</span>
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent><p>Mass Regex Edit</p></TooltipContent>
+                          </Tooltip>
 
-                    <Separator orientation="vertical" className="h-6 hidden lg:block" />
+                          <DropdownMenu>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <DropdownMenuTrigger asChild>
+                                  <Button variant="outline" size="sm" disabled={selectedChannels.size === 0} className="h-11 px-2 font-bold text-xs ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:h-8 sm:w-10 sm:px-0">
+                                    <span className="sm:hidden">TVG-ID Matching</span><span className="hidden sm:inline">ID</span>
+                                  </Button>
+                                </DropdownMenuTrigger>
+                              </TooltipTrigger>
+                              <TooltipContent>Match Settings</TooltipContent>
+                            </Tooltip>
+                            <DropdownMenuContent>
+                              <DropdownMenuLabel>Match by TVG-ID</DropdownMenuLabel>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem onClick={() => handleBulkMatchSettings(true)}>Enable</DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => handleBulkMatchSettings(false)}>Disable</DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
 
-                    {/* Section: Periods */}
-                    <div className="flex items-center gap-3">
-                      <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Periods</div>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={handleBatchAssignPeriods}
+                        <Separator orientation="vertical" className="h-6 hidden lg:block" />
+
+                        {/* Section: Periods */}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Periods</div>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={handleBatchAssignPeriods}
+                                disabled={selectedChannels.size === 0}
+                                className="h-11 gap-1 px-2 sm:h-8"
+                              >
+                                <div className="flex items-center gap-0.5">
+                                  <Clock className="h-4 w-4" />
+                                  <Plus className="h-3 w-3" />
+                                </div>
+                                <span className="text-xs sm:sr-only">Assign Periods</span>
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Assign Periods</TooltipContent>
+                          </Tooltip>
+
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setBulkPeriodEditOpen(true)}
+                                disabled={selectedChannels.size === 0}
+                                className="h-11 gap-1 px-2 sm:h-8 sm:w-8 sm:p-0"
+                              >
+                                <Edit className="h-4 w-4" />
+                                <span className="text-xs sm:sr-only">Mass Period Edit</span>
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Mass Period Edit</TooltipContent>
+                          </Tooltip>
+                        </div>
+
+                        <Separator orientation="vertical" className="h-6 hidden lg:block" />
+
+                        {/* Section: EPG Profile */}
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">EPG Profile</div>
+                          <Select
+                            value={assignEpgProfileId}
+                            onValueChange={(v) => {
+                              setAssignEpgProfileId(v)
+                              handleBatchAssignEpgProfile(v)
+                            }}
                             disabled={selectedChannels.size === 0}
-                            className="h-8 px-2"
                           >
-                            <div className="flex items-center gap-0.5">
-                              <Clock className="h-4 w-4" />
-                              <Plus className="h-3 w-3" />
-                            </div>
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Assign Periods</TooltipContent>
-                      </Tooltip>
+                            <SelectTrigger className="h-11 w-[160px] max-w-full text-xs sm:h-8">
+                              <SelectValue placeholder="Assign EPG profile…" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">— Remove EPG profile —</SelectItem>
+                              {profiles.map((profile) => (
+                                <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
 
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setBulkPeriodEditOpen(true)}
-                            disabled={selectedChannels.size === 0}
-                            className="h-8 w-8 p-0"
-                          >
-                            <Edit className="h-4 w-4" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Mass Period Edit</TooltipContent>
-                      </Tooltip>
+                        <Separator orientation="vertical" className="h-6 hidden lg:block" />
+
+                        <div className="flex items-center gap-2 sm:ml-auto">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm"
+                                variant="destructive"
+                                onClick={() => setDeleteDialogOpen(true)}
+                                disabled={selectedChannels.size === 0}
+                                className="h-11 gap-1 px-2 sm:h-8 sm:w-8 sm:p-0"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                                <span className="text-xs sm:sr-only">Delete Regex</span>
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent><p>Delete Selected</p></TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
                     </div>
-
-                    <Separator orientation="vertical" className="h-6 hidden lg:block" />
-
-                    {/* Section: EPG Profile */}
-                    <div className="flex items-center gap-3">
-                      <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">EPG Profile</div>
-                      <Select
-                        value={assignEpgProfileId}
-                        onValueChange={(v) => {
-                          setAssignEpgProfileId(v)
-                          handleBatchAssignEpgProfile(v)
-                        }}
-                        disabled={selectedChannels.size === 0}
-                      >
-                        <SelectTrigger className="h-8 w-[160px] text-xs">
-                          <SelectValue placeholder="Assign EPG profile…" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="none">— Remove EPG profile —</SelectItem>
-                          {profiles.map((profile) => (
-                            <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    <Separator orientation="vertical" className="h-6 hidden lg:block" />
-
-                    <div className="flex items-center gap-2 ml-auto">
-                      <Badge variant="secondary" className="whitespace-nowrap text-[10px]">
-                        {selectedChannels.size} selected
-                      </Badge>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            size="sm"
-                            variant="destructive"
-                            onClick={() => setDeleteDialogOpen(true)}
-                            disabled={selectedChannels.size === 0}
-                            className="h-8 w-8 p-0"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent><p>Delete Selected</p></TooltipContent>
-                      </Tooltip>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
+                  </details>
+                </div>
+              </div>
 
               {/* Pagination info and controls at top */}
               {displayChannels.length > 0 && (
-                <div className="flex items-center justify-between">
-                  <div className="text-sm text-muted-foreground">
-                    Showing {startIndex + 1}-{Math.min(endIndex, displayChannels.length)} of {displayChannels.length} channels
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs text-muted-foreground sm:text-sm">
+                    {startIndex + 1}-{Math.min(endIndex, displayChannels.length)} of {displayChannels.length}<span className="hidden sm:inline"> channels</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Label htmlFor="items-per-page" className="text-sm whitespace-nowrap">Items per page:</Label>
+                    <Label htmlFor="items-per-page" className="sr-only sm:not-sr-only sm:text-sm sm:whitespace-nowrap">Per page:</Label>
                     <Select
                       value={itemsPerPage.toString()}
                       onValueChange={(value) => {
@@ -2616,7 +2665,7 @@ export default function ChannelConfiguration() {
                         setCurrentPage(1)
                       }}
                     >
-                      <SelectTrigger className="h-9 w-[100px]">
+                      <SelectTrigger id="items-per-page" className="h-11 w-[72px] sm:h-9">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -2653,10 +2702,11 @@ export default function ChannelConfiguration() {
                   {/* Table Header */}
                   <Card>
                     <CardContent className="p-0">
-                      <div className="border-b bg-muted/50">
-                        <div className={`gap-2 px-3 py-3 font-medium text-sm`} style={{ gridTemplateColumns: REGEX_TABLE_GRID_COLS, display: 'grid' }}>
+                      <div className="hidden border-b bg-muted/30 xl:block">
+                        <div className={`gap-3 px-4 py-3 font-medium text-sm`} style={{ gridTemplateColumns: REGEX_TABLE_GRID_COLS, display: 'grid' }}>
                           <div className="flex items-center">
                             <Checkbox
+                              aria-label="Select all filtered channels"
                               checked={filteredChannels.length > 0 && filteredChannels.every(ch => selectedChannels.has(ch.id))}
                               onCheckedChange={(checked) => {
                                 const newSet = new Set(selectedChannels)
@@ -2671,20 +2721,17 @@ export default function ChannelConfiguration() {
                               }}
                             />
                           </div>
-                          <div>#</div>
-                          <div>Logo</div>
-                          <div>Channel Name</div>
-                          <div>Channel Group</div>
-                          <div>Active Periods</div>
-                          <div>Regex Patterns</div>
-                          <div>Actions</div>
+                          <div>Channel</div>
+                          <div>Streams</div>
+                          <div>Effective profile</div>
+                          <div className="text-right">Actions</div>
                         </div>
                       </div>
 
                       {/* Table Rows */}
                       <div className="divide-y">
                         {paginatedChannels.map(channel => {
-                          const group = groups.find(g => String(g.id) === String(channel.channel_group_id))
+                          const group = groupsById.get(String(channel.channel_group_id))
 
 
                           return (
@@ -2710,6 +2757,7 @@ export default function ChannelConfiguration() {
                               onRefresh={loadData}
                               onAssignEpgProfile={handleAssignEpgProfile}
                               matchCount={matchCounts[String(channel.id)]}
+                              matchCountState={matchCountStates[String(channel.id)]}
                               totalStreamCount={totalStreamCount}
                               activeProfile={activeProfiles[String(channel.id)]}
                             />
@@ -2722,76 +2770,14 @@ export default function ChannelConfiguration() {
               )}
 
               {/* Pagination controls at bottom */}
-              {totalPages > 1 && (
-                <div className="flex items-center justify-center gap-2 pt-4">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setCurrentPage(1)}
-                    disabled={currentPage === 1}
-                  >
-                    First
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setCurrentPage(currentPage - 1)}
-                    disabled={currentPage === 1}
-                  >
-                    Previous
-                  </Button>
-                  <div className="flex items-center gap-1">
-                    {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                      // Show pages around current page
-                      let pageNum
-                      if (totalPages <= 5) {
-                        pageNum = i + 1
-                      } else if (currentPage <= 3) {
-                        pageNum = i + 1
-                      } else if (currentPage >= totalPages - 2) {
-                        pageNum = totalPages - 4 + i
-                      } else {
-                        pageNum = currentPage - 2 + i
-                      }
-
-                      return (
-                        <Button
-                          key={pageNum}
-                          variant={currentPage === pageNum ? "default" : "outline"}
-                          size="sm"
-                          onClick={() => setCurrentPage(pageNum)}
-                          className="w-9"
-                        >
-                          {pageNum}
-                        </Button>
-                      )
-                    })}
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setCurrentPage(currentPage + 1)}
-                    disabled={currentPage === totalPages}
-                  >
-                    Next
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setCurrentPage(totalPages)}
-                    disabled={currentPage === totalPages}
-                  >
-                    Last
-                  </Button>
-                </div>
-              )}
+              <ChannelPagination page={currentPage} totalPages={totalPages} onPageChange={setCurrentPage} label="Channels pagination" />
             </div>
           </TabsContent>
 
           <TabsContent value="ordering" className="space-y-6">
             {hasOrderChanges && (
               <Alert>
-                <AlertDescription className="flex items-center justify-between">
+                <AlertDescription className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <span>You have unsaved changes</span>
                   <div className="flex gap-2">
                     <Button size="sm" variant="outline" onClick={handleResetOrder}>
@@ -2810,17 +2796,17 @@ export default function ChannelConfiguration() {
 
             <Card>
               <CardHeader>
-                <div className="flex items-center justify-between">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
                     <CardTitle>Channel List</CardTitle>
                     <CardDescription>
-                      {visibleOrderedChannels.length} visible channels ({orderedChannels.length} total) - Drag and drop within the current page to reorder
+                      {orderedChannels.length} channels / Drag or use the keyboard to reorder this page.
                     </CardDescription>
                   </div>
                   <div className="flex items-center gap-2">
                     <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
                     <Select value={sortBy} onValueChange={handleSort}>
-                      <SelectTrigger className="w-[200px]">
+                      <SelectTrigger className="w-full sm:w-[200px]">
                         <SelectValue placeholder="Sort by..." />
                       </SelectTrigger>
                       <SelectContent>
@@ -2836,12 +2822,12 @@ export default function ChannelConfiguration() {
               <CardContent className="space-y-4">
                 {/* Pagination info and controls at top */}
                 {visibleOrderedChannels.length > 0 && (
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div className="text-sm text-muted-foreground">
                       Showing {orderStartIndex + 1}-{Math.min(orderEndIndex, visibleOrderedChannels.length)} of {visibleOrderedChannels.length} channels
                     </div>
                     <div className="flex items-center gap-2">
-                      <Label htmlFor="order-items-per-page" className="text-sm whitespace-nowrap">Items per page:</Label>
+                      <Label htmlFor="order-items-per-page" className="text-sm whitespace-nowrap">Per page:</Label>
                       <Select
                         value={orderItemsPerPage.toString()}
                         onValueChange={(value) => {
@@ -2887,75 +2873,14 @@ export default function ChannelConfiguration() {
                     </DndContext>
 
                     {/* Pagination controls at bottom */}
-                    {orderTotalPages > 1 && (
-                      <div className="flex items-center justify-center gap-2 pt-4">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setOrderCurrentPage(1)}
-                          disabled={orderCurrentPage === 1}
-                        >
-                          First
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setOrderCurrentPage(orderCurrentPage - 1)}
-                          disabled={orderCurrentPage === 1}
-                        >
-                          Previous
-                        </Button>
-                        <div className="flex items-center gap-1">
-                          {Array.from({ length: Math.min(5, orderTotalPages) }, (_, i) => {
-                            let pageNum
-                            if (orderTotalPages <= 5) {
-                              pageNum = i + 1
-                            } else if (orderCurrentPage <= 3) {
-                              pageNum = i + 1
-                            } else if (orderCurrentPage >= orderTotalPages - 2) {
-                              pageNum = orderTotalPages - 4 + i
-                            } else {
-                              pageNum = orderCurrentPage - 2 + i
-                            }
-
-                            return (
-                              <Button
-                                key={pageNum}
-                                variant={orderCurrentPage === pageNum ? "default" : "outline"}
-                                size="sm"
-                                onClick={() => setOrderCurrentPage(pageNum)}
-                                className="w-9"
-                              >
-                                {pageNum}
-                              </Button>
-                            )
-                          })}
-                        </div>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setOrderCurrentPage(orderCurrentPage + 1)}
-                          disabled={orderCurrentPage === orderTotalPages}
-                        >
-                          Next
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setOrderCurrentPage(orderTotalPages)}
-                          disabled={orderCurrentPage === orderTotalPages}
-                        >
-                          Last
-                        </Button>
-                      </div>
-                    )}
+                    <ChannelPagination page={orderCurrentPage} totalPages={orderTotalPages} onPageChange={setOrderCurrentPage} label="Channel order pagination" />
                   </>
                 )}
               </CardContent>
             </Card>
 
             {hasOrderChanges && (
-              <div className="flex justify-end gap-2">
+              <div className="flex flex-wrap justify-end gap-2">
                 <Button variant="outline" onClick={handleResetOrder}>
                   <RotateCcw className="h-4 w-4 mr-2" />
                   Reset Changes
@@ -2980,13 +2905,13 @@ export default function ChannelConfiguration() {
                     </CardDescription>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
-                    <Button variant="outline" size="sm" onClick={loadGroupsConfig} disabled={loadingGroupsConfig} className="h-8">
+                    <Button variant="outline" size="sm" aria-label="Refresh group configuration" onClick={loadGroupsConfig} disabled={loadingGroupsConfig} className="min-h-11">
                       {loadingGroupsConfig ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
                     </Button>
                   </div>
                 </div>
                 <div className="rounded-md border bg-muted/20 p-3">
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                  <div className="flex flex-col gap-3 2xl:flex-row 2xl:items-end 2xl:justify-between">
                     <div className="space-y-1">
                       <div className="flex items-center gap-2 text-sm font-medium">
                         <UserRound className="h-4 w-4" />
@@ -2996,7 +2921,7 @@ export default function ChannelConfiguration() {
                         Select one or more groups below, choose a profile, then apply it to all selected groups.
                       </p>
                     </div>
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <div className="flex flex-wrap items-center gap-2">
                       <Badge variant="secondary" className="h-8 justify-center px-3 text-xs">
                         {selectedGroups.size} selected
                       </Badge>
@@ -3005,7 +2930,7 @@ export default function ChannelConfiguration() {
                         onValueChange={setBulkGroupProfileId}
                         disabled={savingBulkGroupProfile}
                       >
-                        <SelectTrigger className="h-8 w-full sm:w-[240px] text-xs">
+                        <SelectTrigger aria-label="Bulk group automation profile" className="min-h-11 w-full sm:w-[240px] text-xs">
                           <SelectValue placeholder="Choose profile" />
                         </SelectTrigger>
                         <SelectContent>
@@ -3020,7 +2945,7 @@ export default function ChannelConfiguration() {
                         size="sm"
                         onClick={handleBulkAssignGroupProfile}
                         disabled={selectedGroups.size === 0 || savingBulkGroupProfile || !bulkGroupProfileId}
-                        className="h-8 min-w-[170px]"
+                        className="min-h-11"
                       >
                         {savingBulkGroupProfile ? (
                           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -3076,7 +3001,7 @@ export default function ChannelConfiguration() {
                       return (
                         <Card key={group.id} className="border">
                           <CardContent className="p-4">
-                            <div className="flex items-start justify-between gap-4">
+                            <div className="grid grid-cols-[20px_minmax(0,1fr)] gap-3">
                               <Checkbox
                                 checked={selectedGroups.has(group.id)}
                                 onCheckedChange={() => toggleGroupSelection(group.id)}
@@ -3084,8 +3009,8 @@ export default function ChannelConfiguration() {
                                 aria-label={`Select group ${group.name}`}
                               />
                               <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2 mb-2">
-                                  <h3 className="font-semibold text-base">{group.name}</h3>
+                                <div className="flex flex-wrap items-center gap-2 mb-2">
+                                  <h3 className="break-words font-semibold text-base">{group.name}</h3>
                                   <Badge variant="secondary" className="text-xs">
                                     ID: {group.id}
                                   </Badge>
@@ -3101,9 +3026,9 @@ export default function ChannelConfiguration() {
                                   ) : (
                                     <div className="flex flex-wrap gap-2">
                                       {config.periods.map((period) => (
-                                        <Badge key={period.id} variant="outline" className="gap-1 pr-1">
+                                        <Badge key={period.id} variant="outline" className="max-w-full flex-wrap gap-1 pr-1">
                                           <Clock className="h-3 w-3" />
-                                          <span>{period.name}</span>
+                                          <span className="break-words">{period.name}</span>
                                           {period.profile_name && (
                                             <span className="text-muted-foreground">· {period.profile_name}</span>
                                           )}
@@ -3111,7 +3036,7 @@ export default function ChannelConfiguration() {
                                             variant="ghost"
                                             size="sm"
                                             className="h-4 w-4 p-0 ml-1 hover:bg-destructive hover:text-destructive-foreground rounded-full"
-                                            onClick={() => handleRemoveGroupPeriod(group, period.id)}
+                                            aria-label={`Remove ${period.name} from ${group.name}`} onClick={() => handleRemoveGroupPeriod(group, period.id)}
                                           >
                                             <X className="h-3 w-3" />
                                           </Button>
@@ -3127,7 +3052,7 @@ export default function ChannelConfiguration() {
                                     Automation Profile
                                   </div>
                                   {groupAutomationProfile ? (
-                                    <Badge variant="outline" className="gap-1 text-xs">
+                                    <Badge variant="outline" className="max-w-full flex-wrap gap-1 break-words text-xs">
                                       <UserRound className="h-3 w-3" />
                                       {groupAutomationProfile.name}
                                     </Badge>
@@ -3157,25 +3082,25 @@ export default function ChannelConfiguration() {
                                     EPG Profile
                                   </div>
                                   {groupEpgProfile ? (
-                                    <Badge variant="outline" className="gap-1 text-xs">
+                                    <Badge variant="outline" className="max-w-full flex-wrap gap-1 break-words text-xs">
                                       <CalendarClock className="h-3 w-3" />
                                       {groupEpgProfile.name}
                                     </Badge>
                                   ) : (
-                                    <p className="text-sm text-muted-foreground italic">No profile assigned</p>
+                                    <p className="text-sm text-muted-foreground italic">Use period profile</p>
                                   )}
                                 </div>
                               </div>
 
                               {/* Action buttons */}
-                              <div className="flex gap-2 flex-shrink-0 flex-wrap">
+                              <div className="col-span-2 flex flex-wrap gap-2">
                                 <Tooltip>
                                   <TooltipTrigger asChild>
                                     <Button
                                       variant="outline"
                                       size="sm"
                                       onClick={() => handleOpenGroupAssignProfile(group)}
-                                      className="h-8"
+                                      className="min-h-11"
                                     >
                                       <UserRound className="h-4 w-4 mr-1" />
                                       Profile
@@ -3189,7 +3114,7 @@ export default function ChannelConfiguration() {
                                       variant="outline"
                                       size="sm"
                                       onClick={() => handleOpenGroupAssignPeriods(group)}
-                                      className="h-8"
+                                      className="min-h-11"
                                     >
                                       <Clock className="h-4 w-4 mr-1" />
                                       Periods
@@ -3203,7 +3128,7 @@ export default function ChannelConfiguration() {
                                       variant="outline"
                                       size="sm"
                                       onClick={() => handleOpenGroupAssignMatching(group)}
-                                      className="h-8"
+                                      className="min-h-11"
                                     >
                                       <Edit2 className="h-4 w-4 mr-1" />
                                       Matching
@@ -3217,7 +3142,7 @@ export default function ChannelConfiguration() {
                                       variant="outline"
                                       size="sm"
                                       onClick={() => handleOpenGroupAssignEpgProfile(group)}
-                                      className="h-8"
+                                      className="min-h-11"
                                     >
                                       <CalendarClock className="h-4 w-4 mr-1" />
                                       EPG Profile
