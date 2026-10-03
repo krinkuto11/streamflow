@@ -13,8 +13,10 @@ import os
 import json
 import threading
 import time
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Callable
 import requests
+from apps.core import http_transport
+from apps.core.operation_timing import STREAM_OPERATION_TIMINGS
 from pathlib import Path
 from dotenv import load_dotenv, set_key
 
@@ -43,6 +45,7 @@ from apps.core.auth import (
 )
 
 logger = setup_logging(__name__)
+CONTROL_PLANE_TIMINGS = STREAM_OPERATION_TIMINGS
 
 _stream_stats_update_lock = threading.RLock()
 _channel_assignment_locks_guard = threading.Lock()
@@ -78,12 +81,12 @@ def fetch_data_from_url(url: str) -> Optional[Any]:
         Optional[Any]: JSON response data if successful, None otherwise.
     """
     log_function_call(logger, "fetch_data_from_url", url=url[:80] if len(url) > 80 else url)
-    start_time = time.time()
+    start_time = time.monotonic()
     
     try:
         log_api_request(logger, "GET", url)
-        resp = requests.get(url, headers=_get_auth_headers(), timeout=30)
-        elapsed = time.time() - start_time
+        resp = http_transport.get(url, headers=_get_auth_headers(), timeout=30)
+        elapsed = time.monotonic() - start_time
         log_api_response(logger, "GET", url, resp.status_code, elapsed)
         
         resp.raise_for_status()
@@ -102,15 +105,15 @@ def fetch_data_from_url(url: str) -> Optional[Any]:
             logger.debug("Got 401 response, attempting token refresh")
             if _refresh_token():
                 logger.info("Retrying request with new token...")
-                retry_start = time.time()
+                retry_start = time.monotonic()
                 log_api_request(logger, "GET", url)
-                resp = requests.get(url, headers=_get_auth_headers(), timeout=30)
-                retry_elapsed = time.time() - retry_start
+                resp = http_transport.get(url, headers=_get_auth_headers(), timeout=30)
+                retry_elapsed = time.monotonic() - retry_start
                 log_api_response(logger, "GET", url, resp.status_code, retry_elapsed)
                 
                 resp.raise_for_status()
                 data = resp.json()
-                total_elapsed = time.time() - start_time
+                total_elapsed = time.monotonic() - start_time
                 log_function_return(logger, "fetch_data_from_url", f"<data: {type(data).__name__}>", total_elapsed)
                 return data
             else:
@@ -124,122 +127,78 @@ def fetch_data_from_url(url: str) -> Optional[Any]:
         return None
 
 def patch_request(url: str, payload: Dict[str, Any], max_retries: int = 2) -> requests.Response:
-    """
-    Send a PATCH request with authentication and retry logic.
-    
-    Makes an authenticated PATCH request to the specified URL. If the
-    request fails with a 401 error, automatically refreshes the token
-    and retries once. Handle 5xx errors and network issues with retries.
-    
-    Parameters:
-        url (str): The URL to send the PATCH request to.
-        payload (Dict[str, Any]): The JSON payload to send.
-        max_retries (int): Maximum attempts for transient 500 errors.
-        
-    Returns:
-        requests.Response: The response object from the request.
-        
-    Raises:
-        requests.exceptions.RequestException: If request fails.
-    """
-    retries = 0
-    while retries <= max_retries:
+    """Write an absolute-field PATCH with bounded auth/transient retries."""
+    max_retries = max(0, int(max_retries))
+    for attempt in range(max_retries + 1):
         try:
-            resp = requests.patch(
-                url, json=payload, headers=_get_auth_headers(), timeout=30
-            )
-            resp.raise_for_status()
-            return resp
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                if _refresh_token():
-                    logger.info("Retrying PATCH request with new token...")
-                    resp = requests.patch(
-                        url, json=payload, headers=_get_auth_headers(), timeout=30
-                    )
-                    resp.raise_for_status()
-                    return resp
-                else:
-                    raise
-            elif e.response.status_code >= 500 and retries < max_retries:
-                logger.warning(f"Got HTTP {e.response.status_code} patching data to {url}. Retrying {retries+1}/{max_retries}...")
-                import time
-                time.sleep(2)
-                retries += 1
-                continue
-            else:
-                logger.error(
-                    f"Error patching data to {url}: {e.response.text}"
-                )
+            with CONTROL_PLANE_TIMINGS.measure("dispatcharr_write"):
+                response = http_transport.patch(url, json=payload, headers=_get_auth_headers(), timeout=30)
+            if response.status_code == 401 and attempt == 0 and _refresh_token():
+                with CONTROL_PLANE_TIMINGS.measure("dispatcharr_write"):
+                    response = http_transport.patch(url, json=payload, headers=_get_auth_headers(), timeout=30)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if (status is not None and status < 500 and status != 429) or attempt >= max_retries:
                 raise
-        except requests.exceptions.RequestException as e:
-            if retries < max_retries:
-                logger.warning(f"Network error patching data to {url}: {e}. Retrying {retries+1}/{max_retries}...")
-                import time
-                time.sleep(2)
-                retries += 1
-                continue
-            logger.error(f"Error patching data to {url}: {e}")
-            raise
+            delay = min(8.0, 2.0 ** (attempt + 1))
+            if status == 429:
+                try:
+                    delay = min(30.0, max(0.0, float(exc.response.headers.get("Retry-After", delay))))
+                except (TypeError, ValueError):
+                    pass
+            time.sleep(delay)
+    raise RuntimeError("PATCH retry loop did not return a response")
 
-def post_request(url: str, payload: Dict[str, Any], max_retries: int = 2) -> requests.Response:
+
+class UncertainPostResult(requests.exceptions.RequestException):
+    """A control-plane POST may have succeeded; repeating it is unsafe."""
+
+
+def post_request(
+    url: str, payload: Dict[str, Any], max_retries: int = 2, *,
+    retry_safe: bool = False,
+    reconcile: Optional[Callable[[], Optional[requests.Response]]] = None,
+) -> requests.Response:
+    """POST with operation-aware retries and optional read-only reconciliation.
+
+    Authentication rejection and connection establishment failures can be
+    retried. A read timeout, connection loss, or server error after admission
+    is ambiguous for creation/start operations and must not replay the POST.
+    Set retry_safe only for an explicitly idempotent operation.
     """
-    Send a POST request with authentication and retry logic.
-    
-    Makes an authenticated POST request to the specified URL. If the
-    request fails with a 401 error, automatically refreshes the token
-    and retries once. Handle 5xx errors and network issues with retries.
-    
-    Parameters:
-        url (str): The URL to send the POST request to.
-        payload (Dict[str, Any]): The JSON payload to send.
-        max_retries (int): Maximum attempts for transient 500 errors.
-        
-    Returns:
-        requests.Response: The response object from the request.
-        
-    Raises:
-        requests.exceptions.RequestException: If request fails.
-    """
-    retries = 0
-    while retries <= max_retries:
+    max_retries = max(0, int(max_retries))
+    for attempt in range(max_retries + 1):
         try:
-            resp = requests.post(
-                url, json=payload, headers=_get_auth_headers(), timeout=30
-            )
-            resp.raise_for_status()
-            return resp
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                if _refresh_token():
-                    logger.info("Retrying POST request with new token...")
-                    resp = requests.post(
-                        url, json=payload, headers=_get_auth_headers(), timeout=30
-                    )
-                    resp.raise_for_status()
-                    return resp
-                else:
-                    raise
-            elif e.response.status_code >= 500 and retries < max_retries:
-                logger.warning(f"Got HTTP {e.response.status_code} posting data to {url}. Retrying {retries+1}/{max_retries}...")
-                import time
-                time.sleep(2)
-                retries += 1
-                continue
-            else:
-                logger.error(
-                    f"Error posting data to {url}: {e.response.text}"
-                )
+            with CONTROL_PLANE_TIMINGS.measure("dispatcharr_write"):
+                response = http_transport.post(url, json=payload, headers=_get_auth_headers(), timeout=30)
+            if response.status_code == 401 and attempt == 0 and _refresh_token():
+                # The unauthorized request was rejected, not accepted.
+                with CONTROL_PLANE_TIMINGS.measure("dispatcharr_write"):
+                    response = http_transport.post(url, json=payload, headers=_get_auth_headers(), timeout=30)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            transient = status is None or status >= 500 or status == 429
+            not_admitted = isinstance(exc, requests.exceptions.ConnectTimeout) or status == 429
+            if transient and not not_admitted and not retry_safe:
+                if reconcile is not None:
+                    try:
+                        reconciled = reconcile()
+                    except Exception:
+                        reconciled = None
+                    if reconciled is not None:
+                        return reconciled
+                raise UncertainPostResult(
+                    "POST outcome is unknown; automatic replay was suppressed",
+                    response=getattr(exc, "response", None),
+                ) from exc
+            if not transient or attempt >= max_retries:
                 raise
-        except requests.exceptions.RequestException as e:
-            if retries < max_retries:
-                logger.warning(f"Network error posting data to {url}: {e}. Retrying {retries+1}/{max_retries}...")
-                import time
-                time.sleep(2)
-                retries += 1
-                continue
-            logger.error(f"Error posting data to {url}: {e}")
-            raise
+            time.sleep(min(8.0, 2.0 ** (attempt + 1)))
+    raise RuntimeError("POST retry loop did not return a response")
 
 def fetch_channel_streams(channel_id: int) -> Optional[List[Dict[str, Any]]]:
     """
@@ -788,7 +747,37 @@ def create_channel_from_stream(
     if channel_group_id:
         data["channel_group_id"] = channel_group_id
     
-    return post_request(url, data)
+    fetcher = get_udi_manager().fetcher
+    baseline = fetcher.fetch_channel_ids()
+
+    def reconcile_created_channel():
+        if baseline is None:
+            return None
+        current = fetcher.fetch_channel_ids()
+        if current is None:
+            return None
+        candidates = []
+        for candidate_id in current - baseline:
+            channel = fetcher.fetch_channel_by_id(candidate_id)
+            if not channel or int(stream_id) not in {int(sid) for sid in channel.get('streams') or []}:
+                continue
+            if name and channel.get('name') != name:
+                continue
+            if channel_number is not None and str(channel.get('channel_number')) != str(channel_number):
+                continue
+            if channel_group_id and str(channel.get('channel_group_id')) != str(channel_group_id):
+                continue
+            candidates.append(channel)
+        if len(candidates) != 1:
+            return None
+        response = requests.Response()
+        response.status_code = 201
+        response.headers['Content-Type'] = 'application/json'
+        response._content = json.dumps(candidates[0]).encode('utf-8')
+        response.url = url
+        return response
+
+    return post_request(url, data, reconcile=reconcile_created_channel)
 
 def add_streams_to_channel(
     channel_id: int, stream_ids: List[int], valid_stream_ids: Optional[set] = None,
@@ -936,7 +925,7 @@ def _merge_stream_stats_update(
 
 def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_size: int = 10) -> Tuple[int, int]:
     """
-    Batch update stream stats to reduce API calls during stream checking.
+    Write stream stats in bounded chunks through the existing per-stream API.
     
     This function updates multiple stream stats in batches to optimize performance
     during large-scale stream checking operations. Instead of making one API call
@@ -979,7 +968,7 @@ def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_siz
         logger.error(f"Failed to get UDI manager: {e}")
         return 0, total
     
-    # Process in batches to limit concurrent API calls
+    # Group sequential writes into chunks; Dispatcharr has no bulk stats endpoint here.
     for i in range(0, total, batch_size):
         batch = stream_stats_list[i:i + batch_size]
         logger.debug(f"Processing batch {i // batch_size + 1}/{(total + batch_size - 1) // batch_size} ({len(batch)} streams)")

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useRef } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
@@ -10,6 +10,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip.jsx'
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu.jsx'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
+import { useVisiblePolling } from '@/hooks/use-visible-polling.js'
 import { useToast } from '@/hooks/use-toast.js'
 import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
 import { collectTeamarrFilterOptions, parseFilterCsv, toggleFilterCsvTerm } from '@/lib/teamarr-preflight-filters.js'
@@ -353,11 +354,15 @@ export default function TeamarrPreflight() {
   const [recentEventPage, setRecentEventPage] = useState(1)
   const { toast } = useToast()
 
-  useEffect(() => {
-    loadData()
-    const interval = setInterval(loadStatus, 5000)
-    return () => clearInterval(interval)
-  }, [])
+  const initialPollLoaded = useRef(false)
+  useVisiblePolling(async signal => {
+    if (!initialPollLoaded.current) {
+      await loadData(signal)
+      if (!signal.aborted) initialPollLoaded.current = true
+    } else {
+      await loadStatus(signal)
+    }
+  }, 5000)
 
   useEffect(() => {
     setManagedEventPage(1)
@@ -620,13 +625,14 @@ export default function TeamarrPreflight() {
     setExcludeLeagues((nextConfig.exclude_leagues || []).join(', '))
   }
 
-  const loadData = async () => {
+  const loadData = async (signal) => {
     try {
-      const configResponse = await teamarrPreflightAPI.getConfig()
+      const configResponse = await teamarrPreflightAPI.getConfig(signal ? { signal } : undefined)
       const [statusResponse, profilesResponse] = await Promise.all([
-        teamarrPreflightAPI.getStatus(),
-        automationAPI.getProfiles(),
+        teamarrPreflightAPI.getStatus(signal ? { signal } : undefined),
+        automationAPI.getProfiles(signal ? { signal } : undefined),
       ])
+      if (signal?.aborted) return
       const nextConfig = configResponse.data || {}
       setConfig(nextConfig)
       setEditedConfig(nextConfig)
@@ -634,6 +640,7 @@ export default function TeamarrPreflight() {
       setStatus(statusResponse.data || {})
       setProfiles(normalizeProfiles(profilesResponse.data))
     } catch (err) {
+      if (signal?.aborted) return
       console.error('Failed to load Teamarr preflight data:', err)
       toast({
         title: 'Error',
@@ -645,11 +652,13 @@ export default function TeamarrPreflight() {
     }
   }
 
-  const loadStatus = async () => {
+  const loadStatus = async (signal) => {
     try {
-      const response = await teamarrPreflightAPI.getStatus()
+      const response = await teamarrPreflightAPI.getStatus(signal ? { signal } : undefined)
+      if (signal?.aborted) return
       setStatus(response.data || {})
     } catch (err) {
+      if (signal?.aborted) return
       console.error('Failed to load Teamarr preflight status:', err)
     }
   }

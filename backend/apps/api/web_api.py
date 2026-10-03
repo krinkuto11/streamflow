@@ -324,6 +324,8 @@ static_folder_local = Path(__file__).parent.parent.parent.parent / 'frontend' / 
 
 static_folder = static_folder_docker if static_folder_docker.exists() else static_folder_local
 app = Flask(__name__, static_folder=None)
+from apps.api.status_etags import install_status_etags
+install_status_etags(app)
 CORS(app)  # Enable CORS for React frontend
 
 

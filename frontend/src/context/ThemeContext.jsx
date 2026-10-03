@@ -19,7 +19,7 @@ export function ThemeProvider({ children }) {
     localStorage.setItem('theme', theme)
 
     // Determine the effective theme
-    let effective = theme
+    let effective = theme === 'matrix' ? 'dark' : theme
     if (theme === 'auto') {
       // Check system preference
       effective = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
@@ -29,8 +29,9 @@ export function ThemeProvider({ children }) {
 
     // Update document class
     const root = document.documentElement
-    root.classList.remove('light', 'dark')
+    root.classList.remove('light', 'dark', 'matrix')
     root.classList.add(effective)
+    if (theme === 'matrix') root.classList.add('matrix')
   }, [theme])
 
   // Listen for system theme changes when in auto mode
@@ -42,7 +43,7 @@ export function ThemeProvider({ children }) {
       const effective = e.matches ? 'dark' : 'light'
       setEffectiveTheme(effective)
       const root = document.documentElement
-      root.classList.remove('light', 'dark')
+      root.classList.remove('light', 'dark', 'matrix')
       root.classList.add(effective)
     }
 

@@ -19,7 +19,7 @@ def test_fetch_channels(monkeypatch):
     base_url = "http://100.107.251.48:9191"
     monkeypatch.setenv("DISPATCHARR_BASE_URL", base_url)
     monkeypatch.setenv("DISPATCHARR_TOKEN", "test-token")
-    with patch("backend.api_utils.requests.get") as mock_get:
+    with patch("apps.core.http_transport.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {"results": []}
         result = fetch_data_from_url(f"{base_url}/api/channels/channels/")
@@ -31,7 +31,7 @@ def test_fetch_channel_streams(monkeypatch):
     channel_id = 123
     monkeypatch.setenv("DISPATCHARR_BASE_URL", base_url)
     monkeypatch.setenv("DISPATCHARR_TOKEN", "test-token")
-    with patch("backend.api_utils.requests.get") as mock_get:
+    with patch("apps.core.http_transport.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = []
         result = fetch_data_from_url(f"{base_url}/api/channels/channels/{channel_id}/streams/")

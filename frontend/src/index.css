@@ -47,6 +47,29 @@
     --input: 208 31% 25%;
     --ring: 172 61% 63%;
   }
+
+  .dark.matrix {
+    color-scheme: dark;
+    --background: 0 0% 0%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 4.7%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 6.3%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 142.1 76.2% 36.3%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 0 0% 10%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 10%;
+    --muted-foreground: 0 0% 65%;
+    --accent: 145 35% 12%;
+    --accent-foreground: 142 69% 78%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 14%;
+    --input: 0 0% 18%;
+    --ring: 142.1 76.2% 36.3%;
+  }
 }
 
 @layer base {
@@ -59,6 +82,14 @@
   .dark body {
     background-image: radial-gradient(circle at 15% 0%, hsl(201 42% 17% / .55), transparent 34rem);
     background-attachment: fixed;
+  }
+  .dark.matrix body {
+    background-image: none;
+  }
+  .dark.matrix nav[aria-label="Pages"] a[aria-current="page"] {
+    background-color: hsl(var(--primary));
+    border-color: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
   }
 }
 

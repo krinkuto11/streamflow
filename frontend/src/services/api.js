@@ -1,4 +1,7 @@
 import axios from 'axios';
+import { ConditionalStatusCache } from '@/lib/conditional-status.js';
+
+const statusCache = new ConditionalStatusCache();
 
 // Create axios instance with default config
 // Use /api path since both frontend and backend are served from the same origin
@@ -15,7 +18,7 @@ export const api = axios.create({
 // Request interceptor
 api.interceptors.request.use(
   (config) => {
-    return config;
+    return statusCache.prepare(config);
   },
   (error) => {
     return Promise.reject(error);
@@ -25,9 +28,17 @@ api.interceptors.request.use(
 // Response interceptor for error handling
 api.interceptors.response.use(
   (response) => {
-    return response;
+    const method = (response.config?.method || 'get').toLowerCase();
+    if (!['get', 'head', 'options'].includes(method)) statusCache.clear();
+    const accepted = statusCache.accept(response);
+    if (accepted) return accepted;
+    const headers = axios.AxiosHeaders.from(response.config.headers);
+    headers.delete('If-None-Match');
+    const config = { ...response.config, headers, _statusUnconditional: true };
+    return api.request(config);
   },
   (error) => {
+    if ([401, 403].includes(error.response?.status)) statusCache.clear();
     return Promise.reject(error);
   }
 );
@@ -35,7 +46,7 @@ api.interceptors.response.use(
 // API methods
 export const automationAPI = {
   // Status and Control
-  getStatus: () => api.get('/automation/status'),
+  getStatus: (options) => api.get('/automation/status', options),
   start: () => api.post('/automation/start'),
   stop: () => api.post('/automation/stop'),
   abortRun: () => api.post('/automation/abort-run'),
@@ -43,7 +54,7 @@ export const automationAPI = {
   trigger: () => api.post('/automation/trigger'),
 
   // Configuration
-  getConfig: () => api.get('/automation/config'),
+  getConfig: (options) => api.get('/automation/config', options),
   updateConfig: (config) => api.put('/automation/config', config),
 
   // Global Settings
@@ -51,7 +62,7 @@ export const automationAPI = {
   updateGlobalSettings: (settings) => api.put('/settings/automation/global', settings),
 
   // Profiles
-  getProfiles: () => api.get('/automation/profiles'),
+  getProfiles: (options) => api.get('/automation/profiles', options),
   createProfile: (profile) => api.post('/automation/profiles', profile),
   getProfile: (profileId) => api.get(`/automation/profiles/${profileId}`),
   updateProfile: (profileId, profile) => api.put(`/automation/profiles/${profileId}`, profile),
@@ -108,7 +119,7 @@ export const automationAPI = {
 };
 
 export const jobArbiterAPI = {
-  getStatus: () => api.get('/job-arbiter/status'),
+  getStatus: (options) => api.get('/job-arbiter/status', options),
 };
 
 export const channelsAPI = {
@@ -185,22 +196,22 @@ export const streamAPI = {
 };
 
 export const m3uAPI = {
-  getAccounts: () => api.get('/m3u-accounts'),
+  getAccounts: (options) => api.get('/m3u-accounts', options),
   updateAccountPriority: (accountId, data) => api.patch(`/m3u-accounts/${accountId}/priority`, data),
   updateGlobalPriorityMode: (data) => api.put('/m3u-priority/global-mode', data),
 };
 
 export const streamCheckerAPI = {
-  getStatus: () => api.get('/stream-checker/status'),
+  getStatus: (options) => api.get('/stream-checker/status', options),
   start: () => api.post('/stream-checker/start'),
   stop: () => api.post('/stream-checker/stop'),
   getQueue: () => api.get('/stream-checker/queue'),
   addToQueue: (data) => api.post('/stream-checker/queue/add', data),
   clearQueue: () => api.post('/stream-checker/queue/clear'),
-  getConfig: () => api.get('/stream-checker/config'),
-  getHardwareStatus: () => api.get('/stream-checker/hardware-status'),
+  getConfig: (options) => api.get('/stream-checker/config', options),
+  getHardwareStatus: (options) => api.get('/stream-checker/hardware-status', options),
   updateConfig: (config) => api.put('/stream-checker/config', config),
-  getProgress: () => api.get('/stream-checker/progress'),
+  getProgress: (options) => api.get('/stream-checker/progress', options),
   checkChannel: (channelId) => api.post('/stream-checker/check-channel', { channel_id: channelId }),
   // A single-channel check may refresh providers and probe many streams before
   // replying. Keep the request open while the backend owns the check.
@@ -241,9 +252,9 @@ export const qualityStatsV2API = {
 };
 
 export const shadowBlankMonitorAPI = {
-  getConfig: () => api.get('/shadow-blank-monitor/config'),
+  getConfig: (options) => api.get('/shadow-blank-monitor/config', options),
   updateConfig: (config) => api.put('/shadow-blank-monitor/config', config),
-  getStatus: () => api.get('/shadow-blank-monitor/status'),
+  getStatus: (options) => api.get('/shadow-blank-monitor/status', options),
   start: () => api.post('/shadow-blank-monitor/start'),
   stop: () => api.post('/shadow-blank-monitor/stop'),
   runOnce: () => api.post('/shadow-blank-monitor/run-once'),
@@ -251,13 +262,13 @@ export const shadowBlankMonitorAPI = {
 };
 
 export const viewerActivityAPI = {
-  getStatus: () => api.get('/viewer-activity/status'),
+  getStatus: (options) => api.get('/viewer-activity/status', options),
 };
 
 export const teamarrPreflightAPI = {
-  getConfig: () => api.get('/teamarr-preflight/config'),
+  getConfig: (options) => api.get('/teamarr-preflight/config', options),
   updateConfig: (config) => api.put('/teamarr-preflight/config', config),
-  getStatus: () => api.get('/teamarr-preflight/status'),
+  getStatus: (options) => api.get('/teamarr-preflight/status', options),
   start: () => api.post('/teamarr-preflight/start'),
   stop: () => api.post('/teamarr-preflight/stop'),
   runOnce: () => api.post('/teamarr-preflight/run-once'),
@@ -306,21 +317,21 @@ export const deadStreamsAPI = {
 };
 
 export const setupAPI = {
-  getStatus: () => api.get('/setup-wizard'),
+  getStatus: (options) => api.get('/setup-wizard', options),
   ensureConfig: () => api.post('/setup-wizard/ensure-config'),
 };
 
 export const dispatcharrAPI = {
-  getConfig: () => api.get('/dispatcharr/config'),
+  getConfig: (options) => api.get('/dispatcharr/config', options),
   updateConfig: (config) => api.put('/dispatcharr/config', config),
   testConnection: (config) => api.post('/dispatcharr/test-connection', config),
   initializeUDI: () => api.post('/dispatcharr/initialize-udi', {}, { timeout: 120000 }),
-  getInitializationStatus: () => api.get('/dispatcharr/initialization-status'),
+  getInitializationStatus: (options) => api.get('/dispatcharr/initialization-status', options),
 };
 
 // OpenStream monitoring: the API key Streamflow sends to OpenStream's control plane.
 export const openstreamAPI = {
-  getConfig: () => api.get('/openstream/config'),
+  getConfig: (options) => api.get('/openstream/config', options),
   updateConfig: (config) => api.put('/openstream/config', config),
   testConnection: (config) => api.post('/openstream/test-connection', config),
 };
@@ -331,7 +342,7 @@ export const sessionSettingsAPI = {
 };
 
 export const schedulingAPI = {
-  getConfig: () => api.get('/scheduling/config'),
+  getConfig: (options) => api.get('/scheduling/config', options),
   updateConfig: (config) => api.put('/scheduling/config', config),
   getEPGGrid: (forceRefresh = false) => api.get('/scheduling/epg/grid', { params: { force_refresh: forceRefresh } }),
   getChannelPrograms: (channelId) => api.get(`/scheduling/epg/channel/${channelId}`),
@@ -374,7 +385,7 @@ export const groupSettingsAPI = {
 };
 
 export const profileAPI = {
-  getConfig: () => api.get('/profile-config'),
+  getConfig: (options) => api.get('/profile-config', options),
   getProfileChannels: (profileId, includeSnapshot = false) =>
     api.get(`/channels/profiles/${profileId}`, { params: { include_snapshot: includeSnapshot } }),
 };

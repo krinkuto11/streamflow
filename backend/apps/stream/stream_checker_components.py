@@ -559,6 +559,19 @@ class ChannelUpdateTracker:
                 }
             self._save_updates()
     
+    def invalidate_checked_streams(self, channel_id: int, stream_ids) -> None:
+        """Drop immunity only for streams whose source metadata changed."""
+        changed = {int(sid) for sid in stream_ids}
+        if not changed:
+            return
+        with self.lock:
+            entry = self.updates.get('channels', {}).get(str(channel_id))
+            if entry is not None:
+                entry['checked_stream_ids'] = [sid for sid in entry.get('checked_stream_ids', []) if int(sid) not in changed]
+                entry['needs_check'] = True
+                entry['last_check'] = None
+                self._save_updates()
+
     def get_checked_stream_ids(self, channel_id: int) -> List[int]:
         """Get the list of stream IDs that have been checked for a channel.
         

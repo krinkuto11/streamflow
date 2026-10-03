@@ -1445,7 +1445,7 @@ def _ffprobe_media_fallback(
         url,
     ]
 
-    start = time.time()
+    start = time.monotonic()
     try:
         result = _run_ffmpeg_with_optional_fallback(
             command,
@@ -1466,7 +1466,7 @@ def _ffprobe_media_fallback(
         logger.warning(f"  [ffprobe fallback] Failed to start: {scrub_urls(exc)}")
         return None
 
-    elapsed = time.time() - start
+    elapsed = time.monotonic() - start
     if result.returncode != 0 or not result.stdout:
         logger.warning(
             "  [ffprobe fallback] No usable media info returned "
@@ -1691,7 +1691,7 @@ def _run_visual_detection_probe(
 
     visual_timeout = timeout + visual_duration + stream_startup_buffer
     try:
-        start = time.time()
+        start = time.monotonic()
         visual_slot_acquired = False
         try:
             _acquire_semaphore_with_preemption(
@@ -1712,7 +1712,7 @@ def _run_visual_detection_probe(
         finally:
             if visual_slot_acquired:
                 _VISUAL_PROBE_SEMAPHORE.release()
-        elapsed = time.time() - start
+        elapsed = time.monotonic() - start
         result_data['visual_probe_elapsed_time'] = elapsed
         result_data['visual_probe_completed'] = visual_result.returncode == 0
 
@@ -1990,7 +1990,7 @@ def get_stream_info_and_bitrate(
         result_data.update(visual_result)
 
     try:
-        start = time.time()
+        start = time.monotonic()
         result = _run_ffmpeg_with_optional_fallback(
             command,
             fallback_command=fallback_command,
@@ -2001,7 +2001,7 @@ def get_stream_info_and_bitrate(
             context="stream analysis",
             preempt_check=preempt_check,
         )
-        elapsed = time.time() - start
+        elapsed = time.monotonic() - start
         result_data['elapsed_time'] = elapsed
 
         output = result.stderr
@@ -2249,7 +2249,7 @@ def get_stream_info_and_bitrate(
             result_data['status'] = "PREEMPTED"
             result_data['preempted'] = True
             result_data['preempt_reason'] = 'viewer_preempted'
-            result_data['elapsed_time'] = time.time() - start if 'start' in locals() else 0
+            result_data['elapsed_time'] = time.monotonic() - start if 'start' in locals() else 0
             return result_data
         if fallback:
             result_data.update(fallback)
@@ -2265,7 +2265,7 @@ def get_stream_info_and_bitrate(
         result_data['status'] = "PREEMPTED"
         result_data['preempted'] = True
         result_data['preempt_reason'] = 'viewer_preempted'
-        result_data['elapsed_time'] = time.time() - start if 'start' in locals() else 0
+        result_data['elapsed_time'] = time.monotonic() - start if 'start' in locals() else 0
     except Exception as e:
         logger.error(f"Stream analysis failed: {e}")
         result_data['status'] = "Error"
@@ -2335,7 +2335,7 @@ def get_stream_bitrate(
     actual_timeout = _stream_analysis_timeout(timeout, duration, stream_startup_buffer)
 
     try:
-        start = time.time()
+        start = time.monotonic()
         result = _run_ffmpeg_with_optional_fallback(
             command,
             fallback_command=fallback_command,
@@ -2345,7 +2345,7 @@ def get_stream_bitrate(
             text=True,
             context="bitrate analysis",
         )
-        elapsed = time.time() - start
+        elapsed = time.monotonic() - start
         output = result.stderr
         progress_bitrate = None
         last_stats_line = None
