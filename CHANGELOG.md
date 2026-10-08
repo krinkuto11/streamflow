@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Compatible React updates** - Group React, React DOM and their type packages together for future Dependabot version updates; retain separate review for other major updates.
 - **Dependency update policy** - Schedule grouped npm and GitHub Actions minor/patch updates against `dev`, keep major updates separate, and configure security-only updates against `main`. Document review requirements and the coordinated Python lockfile/media-image update process.
 
+## [2.7.1] - 2026-10-09
+
+### Fixed
+
+- **First-time setup (#495)** - Start required EPG refresh, scheduled-event and UDI refresh workers after live Dispatcharr initialization succeeds. A completed first setup can reach full readiness without restarting the container.
+- **Setup initialization retry** - Apply the same worker startup hook when the wizard retries initialization after a failed connection; failed initialization does not start the workers.
+- **Concurrent worker startup** - Serialize worker alive checks and thread creation, keeping one thread per required worker when setup completion, connection saves or direct start requests overlap.
+
+Existing user settings, optional automation defaults, API response formats and startup with saved configuration retain their existing behavior. Detailed changes and validation are recorded in [the first-setup development changelog](docs/dev-first-setup-changelog-20261009.md).
+
 ## [2.7.0] - 2026-10-08
 
 This release promotes the tested development branch to `main`. Changes below are relative to **2.6.0.1** and include PRs [#460](https://github.com/krinkuto11/streamflow/pull/460), [#461](https://github.com/krinkuto11/streamflow/pull/461), [#462](https://github.com/krinkuto11/streamflow/pull/462), [#463](https://github.com/krinkuto11/streamflow/pull/463), [#464](https://github.com/krinkuto11/streamflow/pull/464), and the OpenStream monitoring updates.
