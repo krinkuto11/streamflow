@@ -173,6 +173,7 @@ def create_archive(config_dir, backup_dir, *, include_history=True, monitoring_h
                 if (stage / 'monitoring-history.json').stat().st_size > MAX_JSON_BYTES:
                     raise ValueError('Monitoring history exceeds the backup size limit')
             schema, counts = database_summary(stage / 'streamflow.db')
+            counts['monitoring_samples'] = sum(len(stream['metrics']) for session in (monitoring_history or {}).get('sessions', []) for stream in session['streams']) if include_history else 0
             files = {p.relative_to(stage).as_posix(): {'size': p.stat().st_size, 'sha256': digest(p)}
                      for p in sorted(stage.rglob('*')) if p.is_file()}
             if sum(item['size'] for item in files.values()) > MAX_EXTRACTED_BYTES:
@@ -206,6 +207,15 @@ def manifest_metadata(path):
         raise ValueError('Unsupported backup format')
     if type(data.get('include_history')) is not bool or type(data.get('schema_version')) is not int:
         raise ValueError('Invalid backup metadata')
+    summary = data.get('summary')
+    if not isinstance(summary, dict) or set(summary) - {*SUMMARY_TABLES, 'monitoring_samples'} or any(type(value) is not int or value < 0 for value in summary.values()):
+        raise ValueError('Invalid backup summary')
+    if not isinstance(data.get('version'), str) or len(data['version']) > 128:
+        raise ValueError('Invalid backup version')
+    created = data.get('created_at')
+    if not isinstance(created, str) or len(created) > 64:
+        raise ValueError('Invalid backup timestamp')
+    datetime.fromisoformat(created)
     return data
 
 
@@ -218,6 +228,8 @@ def extract_validated(path, destination):
     files = metadata.get('files')
     if not isinstance(files, dict) or 'streamflow.db' not in files or len(files) > 128:
         raise ValueError('Invalid backup file list')
+    if not metadata['include_history'] and 'monitoring-history.json' in files:
+        raise ValueError('Configuration-only backup contains monitoring history')
     with zipfile.ZipFile(path) as archive:
         entries = archive.infolist()
         names = [entry.filename for entry in entries]
@@ -248,7 +260,11 @@ def extract_validated(path, destination):
                 if relative == 'monitoring-history.json':
                     from apps.backups.history import validate_history
                     validate_history(content)
-        schema, _ = database_summary(destination / 'streamflow.db')
+        schema, counts = database_summary(destination / 'streamflow.db')
         if schema != metadata.get('schema_version'):
             raise ValueError('Backup schema check failed')
+        if not metadata['include_history'] and any(counts.get(key) for key in ('runs','quality_measurements','playback_observations')):
+            raise ValueError('Configuration-only backup contains measurement history')
+        if any(metadata['summary'].get(key) != value for key, value in counts.items()):
+            raise ValueError('Backup summary check failed')
     return metadata

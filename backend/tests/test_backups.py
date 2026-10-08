@@ -124,7 +124,7 @@ def test_backup_names_cannot_escape_storage(tmp_path, name):
     with pytest.raises(ValueError): archive.archive_path(tmp_path, name)
 
 
-@pytest.mark.parametrize('attack', ['extra','traversal','checksum','format','schema','history'])
+@pytest.mark.parametrize('attack', ['extra','traversal','checksum','format','schema','history','summary','date','history_flag'])
 def test_damaged_and_unsupported_archives_rejected(persistent, tmp_path, attack):
     original = make(persistent, monitoring_history=history())
     def mutate(data):
@@ -135,6 +135,9 @@ def test_damaged_and_unsupported_archives_rejected(persistent, tmp_path, attack)
         if attack == 'checksum': manifest['files']['streamflow.db']['sha256'] = '0'*64
         if attack == 'format': manifest['format_version'] = 999
         if attack == 'schema': manifest['schema_version'] = 999
+        if attack == 'summary': manifest['summary']['settings'] = {'invalid':'preview'}
+        if attack == 'date': manifest['created_at'] = 'invalid'
+        if attack == 'history_flag': manifest['include_history'] = False
         if attack == 'history':
             import hashlib
             data['monitoring-history.json'] = b'{"format_version":1,"sessions":"bad"}'
