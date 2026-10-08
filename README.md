@@ -79,8 +79,9 @@ Keep a backup of the persistent data directory before updating.
 
 An [Unraid DockerMan template](templates/streamflow.xml) is provided with a
 persistent Appdata path, an editable host port and Unraid user/group defaults.
-See the [Unraid installation guide](docs/unraid.md). Community Applications
-listing is pending submission and review.
+See the [Unraid installation guide](docs/unraid.md), including
+[optional GPU acceleration](docs/unraid.md#optional-gpu-acceleration).
+Community Applications listing is pending submission and review.
 
 ## First setup
 
@@ -112,7 +113,7 @@ For setup, capacity, hardware and troubleshooting details, use the in-app
 | [REST API](docs/API.md) | API reference |
 | [Development](DEVELOPMENT.md) | Local development and tests |
 | [Dependency management](docs/dependency-management.md) | Dependabot policy, review checks and lockfile maintenance |
-| [Unraid](docs/unraid.md) | DockerMan installation, persistent storage, updates and Community Applications submission |
+| [Unraid](docs/unraid.md) | DockerMan installation, persistent storage, updates, GPU acceleration and Community Applications submission |
 | [Changelog](CHANGELOG.md) | Release changes |
 
 ## License
