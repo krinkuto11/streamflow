@@ -787,7 +787,7 @@ export default function TeamarrPreflight() {
               <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="max-h-72 w-[--radix-dropdown-menu-trigger-width] overflow-y-auto">
+          <DropdownMenuContent align="start" className="max-h-72 w-(--radix-dropdown-menu-trigger-width) overflow-y-auto">
             {options.length === 0 ? (
               <DropdownMenuItem disabled>No options</DropdownMenuItem>
             ) : (
@@ -1026,14 +1026,14 @@ export default function TeamarrPreflight() {
               <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
                 <div className="min-w-0 space-y-1">
                   <Label className="text-base">Enabled</Label>
-                  <p className="max-w-[22rem] text-sm leading-snug text-muted-foreground">Auto-starts with the backend</p>
+                  <p className="max-w-88 text-sm leading-snug text-muted-foreground">Auto-starts with the backend</p>
                 </div>
                 <Switch className="mt-1 shrink-0" checked={enabled} onCheckedChange={(value) => updateConfigValue('enabled', value)} />
               </div>
               <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
                 <div className="min-w-0 space-y-1">
                   <Label className="text-base">Managed Events</Label>
-                  <p className="max-w-[28rem] text-sm leading-snug text-muted-foreground">Reads Teamarr managed event channels and queues targeted event checks</p>
+                  <p className="max-w-md text-sm leading-snug text-muted-foreground">Reads Teamarr managed event channels and queues targeted event checks</p>
                 </div>
                 <Switch
                   className="mt-1 shrink-0"
@@ -1044,7 +1044,7 @@ export default function TeamarrPreflight() {
               <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
                 <div className="min-w-0 space-y-1">
                   <Label className="text-base">Static Teams</Label>
-                  <p className="max-w-[28rem] text-sm leading-snug text-muted-foreground">
+                  <p className="max-w-md text-sm leading-snug text-muted-foreground">
                     Uses Teamarr teams with matching Dispatcharr channels; queues only when Teamarr shows a real upcoming or live game window
                   </p>
                 </div>
@@ -1057,7 +1057,7 @@ export default function TeamarrPreflight() {
               <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
                 <div className="min-w-0 space-y-1">
                   <Label className="text-base">Queue Events During Active Checks</Label>
-                  <p className="max-w-[28rem] text-sm leading-snug text-muted-foreground">
+                  <p className="max-w-md text-sm leading-snug text-muted-foreground">
                     On queues due Teamarr event checks during Automation or Stream Checker runs; off waits and does not queue new event checks until active work is done
                   </p>
                 </div>

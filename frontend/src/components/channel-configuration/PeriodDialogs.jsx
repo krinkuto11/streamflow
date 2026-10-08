@@ -608,7 +608,7 @@ export function BatchPeriodEditDialog({ open, onOpenChange, selectedChannelIds, 
                             {profile.channel_ids.length} channel{profile.channel_ids.length !== 1 ? 's' : ''}
                           </div>
                         </div>
-                        <div className="flex-shrink-0">
+                        <div className="shrink-0">
                           <Select disabled={updating === item.id} onValueChange={(value) => handleUpdateProfile(item.id, value)}>
                             <SelectTrigger className="h-8 w-[140px] text-xs">
                               <SelectValue placeholder="Change Profile" />

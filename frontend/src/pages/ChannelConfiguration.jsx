@@ -2458,7 +2458,7 @@ export default function ChannelConfiguration() {
               <div>
                 <div>
                   <details className="group">
-                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-md py-2 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-md py-2 text-sm font-medium focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
                       <span className="min-w-0">
                         <span>Channel tools <span className="hidden font-normal text-muted-foreground sm:inline">/ Bulk actions, import and export</span></span>
                       </span>
@@ -2543,7 +2543,7 @@ export default function ChannelConfiguration() {
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <DropdownMenuTrigger asChild>
-                                  <Button variant="outline" size="sm" disabled={selectedChannels.size === 0} className="h-11 px-2 font-bold text-xs ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:h-8 sm:w-10 sm:px-0">
+                                  <Button variant="outline" size="sm" disabled={selectedChannels.size === 0} className="h-11 px-2 font-bold text-xs ring-offset-background transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:h-8 sm:w-10 sm:px-0">
                                     <span className="sm:hidden">TVG-ID Matching</span><span className="hidden sm:inline">ID</span>
                                   </Button>
                                 </DropdownMenuTrigger>
@@ -2904,7 +2904,7 @@ export default function ChannelConfiguration() {
                       Assign automation profiles and periods to channel groups. New channels added to a group will inherit these settings.
                     </CardDescription>
                   </div>
-                  <div className="flex items-center gap-2 flex-shrink-0">
+                  <div className="flex items-center gap-2 shrink-0">
                     <Button variant="outline" size="sm" aria-label="Refresh group configuration" onClick={loadGroupsConfig} disabled={loadingGroupsConfig} className="min-h-11">
                       {loadingGroupsConfig ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
                     </Button>
@@ -3005,12 +3005,12 @@ export default function ChannelConfiguration() {
                               <Checkbox
                                 checked={selectedGroups.has(group.id)}
                                 onCheckedChange={() => toggleGroupSelection(group.id)}
-                                className="mt-1 flex-shrink-0"
+                                className="mt-1 shrink-0"
                                 aria-label={`Select group ${group.name}`}
                               />
                               <div className="flex-1 min-w-0">
                                 <div className="flex flex-wrap items-center gap-2 mb-2">
-                                  <h3 className="break-words font-semibold text-base">{group.name}</h3>
+                                  <h3 className="wrap-break-word font-semibold text-base">{group.name}</h3>
                                   <Badge variant="secondary" className="text-xs">
                                     ID: {group.id}
                                   </Badge>
@@ -3028,7 +3028,7 @@ export default function ChannelConfiguration() {
                                       {config.periods.map((period) => (
                                         <Badge key={period.id} variant="outline" className="max-w-full flex-wrap gap-1 pr-1">
                                           <Clock className="h-3 w-3" />
-                                          <span className="break-words">{period.name}</span>
+                                          <span className="wrap-break-word">{period.name}</span>
                                           {period.profile_name && (
                                             <span className="text-muted-foreground">· {period.profile_name}</span>
                                           )}
@@ -3052,7 +3052,7 @@ export default function ChannelConfiguration() {
                                     Automation Profile
                                   </div>
                                   {groupAutomationProfile ? (
-                                    <Badge variant="outline" className="max-w-full flex-wrap gap-1 break-words text-xs">
+                                    <Badge variant="outline" className="max-w-full flex-wrap gap-1 wrap-break-word text-xs">
                                       <UserRound className="h-3 w-3" />
                                       {groupAutomationProfile.name}
                                     </Badge>
@@ -3082,7 +3082,7 @@ export default function ChannelConfiguration() {
                                     EPG Profile
                                   </div>
                                   {groupEpgProfile ? (
-                                    <Badge variant="outline" className="max-w-full flex-wrap gap-1 break-words text-xs">
+                                    <Badge variant="outline" className="max-w-full flex-wrap gap-1 wrap-break-word text-xs">
                                       <CalendarClock className="h-3 w-3" />
                                       {groupEpgProfile.name}
                                     </Badge>

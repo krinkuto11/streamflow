@@ -831,7 +831,7 @@ export default function Dashboard() {
                     <DropdownMenuSeparator />
                     <DropdownMenuLabel className="text-xs text-muted-foreground">Specific periods</DropdownMenuLabel>
                     {periods.map(period => (
-                      <DropdownMenuItem className="min-h-11 break-words" key={period.id} onClick={() => handleRunAutomation(period.id)}>
+                      <DropdownMenuItem className="min-h-11 wrap-break-word" key={period.id} onClick={() => handleRunAutomation(period.id)}>
                         {period.name}
                       </DropdownMenuItem>
                     ))}
@@ -1038,7 +1038,7 @@ export default function Dashboard() {
       {/* Background services are separate from the actual check state above. */}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 px-1 text-xs text-muted-foreground">
         <span className="flex items-center gap-1.5"><Activity className="h-3.5 w-3.5" />Scheduler: <span className="font-medium text-foreground">{status ? (schedulerRunning ? 'Active' : 'Stopped') : 'Unknown'}</span></span>
-        <Link to="/shadow-monitor" className="flex flex-wrap items-center gap-1.5 rounded-sm hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <Link to="/shadow-monitor" className="flex flex-wrap items-center gap-1.5 rounded-sm hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
           <Eye className="h-3.5 w-3.5" />Shadow monitor:
           <span className="font-medium text-foreground">{!shadowMonitorStatus ? 'Unknown' : shadowMonitorStatus.running ? `Watching ${shadowWatchedCount} channels` : shadowMonitorStatus.enabled ? 'Enabled' : 'Disabled'}</span>
           {shadowMonitorStatus?.dry_run && <span>(dry run)</span>}

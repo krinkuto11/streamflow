@@ -371,7 +371,7 @@ function StreamMonitoring() {
           ) : visibleSessions.length > 0 && (
             <section aria-label={sessionFilter === 'active' ? 'Active monitoring sessions' : 'All monitoring sessions'} className="space-y-2">
               {selectedSessions.size > 0 && (
-                <div className="sticky top-2 z-20 flex flex-wrap items-center gap-2 rounded-lg border bg-popover p-3 shadow-sm" aria-label="Selected session actions">
+                <div className="sticky top-2 z-20 flex flex-wrap items-center gap-2 rounded-lg border bg-popover p-3 shadow-xs" aria-label="Selected session actions">
                   <span className="mr-auto text-sm font-medium">{selectedSessions.size} selected</span>
                   <Button className="min-h-11" variant="secondary" onClick={handleBatchStop}><Square className="mr-2 h-4 w-4" aria-hidden="true" />Stop selected</Button>
                   <Button className="min-h-11" variant="destructive" onClick={handleBatchDelete}><Trash2 className="mr-2 h-4 w-4" aria-hidden="true" />Delete selected</Button>
@@ -390,7 +390,7 @@ function StreamMonitoring() {
 
           {sessions.length > 0 && (
             <details className="text-sm text-muted-foreground">
-              <summary className="w-fit cursor-pointer rounded py-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">Display options</summary>
+              <summary className="w-fit cursor-pointer rounded py-3 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-primary">Display options</summary>
               <div className="mt-1 flex w-fit items-center gap-1 rounded-md border p-0.5" aria-label="Session layout">
                 <Button variant={viewMode === 'list' ? 'secondary' : 'ghost'} className="min-h-11" onClick={() => setViewMode('list')} aria-pressed={viewMode === 'list'}>
                   <List className="mr-2 h-4 w-4" aria-hidden="true" /> List view
@@ -403,7 +403,7 @@ function StreamMonitoring() {
           )}
 
           <details className="text-sm text-muted-foreground">
-            <summary className="w-fit cursor-pointer rounded py-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">About monitoring</summary>
+            <summary className="w-fit cursor-pointer rounded py-3 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-primary">About monitoring</summary>
             <p className="max-w-3xl pb-2 leading-relaxed">Monitoring sessions track live reliability and manage stream selection in Dispatcharr. Sources move between stable, review and quarantine states. FFmpeg sessions can include screenshots and live previews; OpenStream sessions show swarm health. Open a session to inspect source measurements and use quarantine or revive controls.</p>
           </details>
 
@@ -438,7 +438,7 @@ export function SessionCard({ session, compact = false, onView, onStart, onStop,
         {session.channel_logo_url && <img src={session.channel_logo_url} alt="" className="mt-1 h-9 w-9 shrink-0 rounded bg-muted object-contain p-1" onError={event => { event.target.style.display = 'none'; }} />}
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="break-words text-base font-semibold">{session.channel_name}</h2>
+            <h2 className="wrap-break-word text-base font-semibold">{session.channel_name}</h2>
             <Badge variant={session.is_active ? 'default' : 'secondary'}>{session.is_active ? 'Active' : 'Inactive'}</Badge>
           </div>
           {session.epg_event_title && <p className="mt-1 truncate text-sm text-muted-foreground" title={session.epg_event_title}>{session.epg_event_title}</p>}

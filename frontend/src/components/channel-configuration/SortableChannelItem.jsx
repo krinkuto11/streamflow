@@ -47,19 +47,19 @@ export function SortableChannelItem({ channel }) {
     <div
       ref={setNodeRef}
       style={style}
-      className={`flex min-w-0 items-center gap-2 p-3 bg-card border rounded-lg ${isDragging ? 'shadow-lg' : 'shadow-sm'}`}
+      className={`flex min-w-0 items-center gap-2 p-3 bg-card border rounded-lg ${isDragging ? 'shadow-lg' : 'shadow-xs'}`}
     >
       <button
         type="button"
         aria-label={`Reorder ${channel.name}`}
         {...attributes}
         {...listeners}
-        className="flex h-11 w-8 shrink-0 items-center justify-center rounded cursor-grab active:cursor-grabbing touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex h-11 w-8 shrink-0 items-center justify-center rounded cursor-grab active:cursor-grabbing touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
       >
         <GripVertical className="h-5 w-5 text-muted-foreground" />
       </button>
 
-      <div className="w-9 h-9 flex-shrink-0 bg-muted rounded-md flex items-center justify-center overflow-hidden">
+      <div className="w-9 h-9 shrink-0 bg-muted rounded-md flex items-center justify-center overflow-hidden">
         {logoUrl && !logoError ? (
           <img
             src={logoUrl}

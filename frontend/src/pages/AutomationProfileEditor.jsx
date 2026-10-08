@@ -313,7 +313,7 @@ export default function AutomationProfileEditor() {
 
             {/* Progress Line UI */}
             <div className="relative pt-12 pb-4">
-                <div className="absolute top-[4.25rem] left-0 w-full h-1 bg-muted -translate-y-1/2 z-0" />
+                <div className="absolute top-17 left-0 w-full h-1 bg-muted -translate-y-1/2 z-0" />
                 <div className="flex justify-between items-center relative z-10">
                     {STEPS.map((step, index) => {
                         const enabled = isStepEnabled(step.id)

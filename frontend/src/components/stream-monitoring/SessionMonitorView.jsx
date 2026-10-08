@@ -489,7 +489,7 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
             <ArrowLeft className="h-5 w-5" />
           </Button>
           {logoUrl && (
-            <div className="flex-shrink-0">
+            <div className="shrink-0">
               <img
                 src={logoUrl}
                 alt={session.channel_name}
@@ -633,7 +633,7 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
       {/* Live Stream Preview */}
       {activeStreams.length > 0 && (
         <details className="min-w-0 overflow-hidden rounded-lg border bg-card" onToggle={event => { if (!event.currentTarget.open) setActivePreviewTab(''); }}>
-          <summary className="cursor-pointer rounded-lg px-4 py-4 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">Screenshots and live previews</summary>
+          <summary className="cursor-pointer rounded-lg px-4 py-4 text-sm font-medium focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-primary">Screenshots and live previews</summary>
           <div className="min-w-0 px-4 pb-4">
             <Tabs value={activePreviewTab} onValueChange={setActivePreviewTab} className="w-full">
               <TabsList className="mb-4 h-auto max-w-full">
@@ -647,7 +647,7 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
                 </div>
               )}
 
-              <TabsContent value="screenshots" className="mt-0 outline-none">
+              <TabsContent value="screenshots" className="mt-0 outline-hidden">
                 {activePreviewTab === 'screenshots' && (
                   aliveScreenshots.length > 0 ? (
                     <div className="w-full relative overflow-hidden">
@@ -703,7 +703,7 @@ function SessionMonitorView({ sessionId, onBack, onStop }) {
 
       {(session.epg_event_title || session.epg_event_description) && (
         <details className="rounded-lg border bg-card">
-          <summary className="cursor-pointer rounded-lg px-4 py-3 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
+          <summary className="cursor-pointer rounded-lg px-4 py-3 text-sm font-medium focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-primary">
             {session.epg_event_title || 'Programme details'}
           </summary>
           <div className="space-y-2 px-4 pb-4 text-sm text-muted-foreground">
@@ -817,7 +817,7 @@ function StreamsTable({ streams, isOpenStream = false, sessionId, onQuarantine, 
   return (
     <div className="min-w-0 max-w-full">
       <p className="mb-2 text-xs text-muted-foreground xl:hidden">Scroll sideways to see all source measurements and controls.</p>
-      <div className="max-w-full overflow-x-auto rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" role="region" aria-label="Source measurements" tabIndex={0}>
+      <div className="max-w-full overflow-x-auto rounded-md focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-primary" role="region" aria-label="Source measurements" tabIndex={0}>
       <Table className="min-w-[900px]">
         <TableHeader>
           <TableRow>
@@ -886,7 +886,7 @@ function StreamsTable({ streams, isOpenStream = false, sessionId, onQuarantine, 
                   {stream.status === 'quarantined' && stream.status_reason === 'logo-mismatch' && stream.screenshot_url && (
                     <div className="mt-2 text-xs text-muted-foreground">
                       <p className="mb-1">Last seen:</p>
-                      <a className="block w-24 aspect-video bg-black rounded overflow-hidden focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" href={stream.screenshot_url} target="_blank" rel="noreferrer" aria-label={`Open logo mismatch screenshot for ${stream.name}`}>
+                      <a className="block w-24 aspect-video bg-black rounded overflow-hidden focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-primary" href={stream.screenshot_url} target="_blank" rel="noreferrer" aria-label={`Open logo mismatch screenshot for ${stream.name}`}>
                         <img
                           src={stream.screenshot_url}
                           alt="Logo mismatch screenshot"
@@ -1027,7 +1027,7 @@ function StreamsTable({ streams, isOpenStream = false, sessionId, onQuarantine, 
                   <TableCell colSpan={10 + (isReview ? 1 : 0)} className="bg-muted/30 p-2">
                     <button
                       type="button"
-                      className="min-h-11 rounded px-2 py-1 text-xs font-semibold text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                      className="min-h-11 rounded px-2 py-1 text-xs font-semibold text-primary hover:underline focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-primary"
                       aria-expanded={expandedChartId === stream.stream_id}
                       onClick={() => setExpandedChartId(current => current === stream.stream_id ? null : stream.stream_id)}
                     >

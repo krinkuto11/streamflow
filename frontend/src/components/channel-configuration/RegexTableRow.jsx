@@ -36,7 +36,7 @@ export function ActiveProfileSummary({ activeProfile, details = false }) {
   const profileName = loading ? 'Loading profile...' : failed ? 'Profile load failed' : automation?.profile_name || 'No profile configured'
   return (
     <div className="min-w-0 space-y-1" aria-busy={loading}>
-      <p className={`break-words text-sm ${loading || failed || !automation?.profile_name ? 'text-muted-foreground' : 'font-medium'}`}>{profileName}</p>
+      <p className={`wrap-break-word text-sm ${loading || failed || !automation?.profile_name ? 'text-muted-foreground' : 'font-medium'}`}>{profileName}</p>
       {details && !loading && !failed && (
         <>
           <p className="text-xs text-muted-foreground">
@@ -144,7 +144,7 @@ export function RegexTableRow({
 
   return (
     <div className="border-b last:border-b-0">
-      <div className="grid grid-cols-[24px_minmax(0,1fr)_minmax(0,1fr)] items-start gap-x-3 gap-y-2 p-3 transition-colors hover:bg-muted/20 xl:items-center xl:gap-3 xl:p-4 xl:[grid-template-columns:24px_minmax(0,1.4fr)_112px_minmax(0,1fr)_180px]">
+      <div className="grid grid-cols-[24px_minmax(0,1fr)_minmax(0,1fr)] items-start gap-x-3 gap-y-2 p-3 transition-colors hover:bg-muted/20 xl:items-center xl:gap-3 xl:p-4 xl:grid-cols-[24px_minmax(0,1.4fr)_112px_minmax(0,1fr)_180px]">
         <Checkbox
           aria-label={`Select ${channel.name}`}
           checked={selectedChannels?.has(channel.id)}
@@ -158,7 +158,7 @@ export function RegexTableRow({
             ) : <span className="text-sm font-bold text-muted-foreground">{channel.name?.charAt(0) || '?'}</span>}
           </div>
           <div className="min-w-0">
-            <p className="break-words text-sm font-semibold">{channel.name}</p>
+            <p className="wrap-break-word text-sm font-semibold">{channel.name}</p>
             <p className="truncate text-xs text-muted-foreground">#{channel.channel_number || '-'} / {group?.name || 'Ungrouped'}</p>
           </div>
         </div>

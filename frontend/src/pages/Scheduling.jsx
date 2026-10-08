@@ -1548,7 +1548,7 @@ export default function Scheduling() {
                                     {item.channels?.length > 0 && (
                                       <div className="mt-2 flex flex-wrap gap-1">
                                         {item.channels.slice(0, 5).map((channel) => (
-                                          <Badge key={channel.id} variant="secondary" className="max-w-[12rem] truncate text-xs">
+                                          <Badge key={channel.id} variant="secondary" className="max-w-48 truncate text-xs">
                                             {channel.name || `Channel ${channel.id}`}
                                           </Badge>
                                         ))}

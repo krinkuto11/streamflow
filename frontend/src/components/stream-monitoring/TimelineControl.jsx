@@ -342,7 +342,7 @@ export function TimelineControl({ minTime, maxTime, currentTime, onTimeChange, i
     const viewportWidth = getXPosition(currentTime) - viewportX;
 
     return (
-        <Card className={`min-w-0 border-t sticky bottom-16 z-30 bg-card/95 backdrop-blur shadow-lg lg:bottom-0 ${className || ''}`}>
+        <Card className={`min-w-0 border-t sticky bottom-16 z-30 bg-card/95 backdrop-blur-sm shadow-lg lg:bottom-0 ${className || ''}`}>
             <div className="flex min-w-0 flex-row">
                 <div className="flex min-w-0 flex-1 flex-col">
                     <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/50 px-3 py-2">
@@ -389,7 +389,7 @@ export function TimelineControl({ minTime, maxTime, currentTime, onTimeChange, i
                     </label>
                     <div ref={containerRef} className="relative h-[210px] w-full cursor-crosshair select-none overflow-hidden bg-black" onMouseDown={handleMouseDown}>
                         {/* Ruler */}
-                        <div className="absolute top-0 left-0 right-0 h-[30px] border-b border-white/10 bg-zinc-900/90 backdrop-blur-sm z-20">
+                        <div className="absolute top-0 left-0 right-0 h-[30px] border-b border-white/10 bg-zinc-900/90 backdrop-blur-xs z-20">
                             {ticks.map((t, i) => (
                                 <div key={i} className="absolute top-0 bottom-0 pointer-events-none border-l border-white/5" style={{ left: `${t.percent}%` }}>
                                     <span className="absolute left-1 top-1.5 text-[9px] text-zinc-500 font-mono">
@@ -527,8 +527,8 @@ export function TimelineControl({ minTime, maxTime, currentTime, onTimeChange, i
 
                         {/* Playhead */}
                         <div className="absolute top-0 bottom-0 w-[1.5px] bg-red-600 z-30 pointer-events-none shadow-[0_0_15px_rgba(220,38,38,0.8)]" style={{ left: `${getXPosition(currentTime)}%` }}>
-                            <div className="absolute top-0 -left-[5px] w-0 h-0 border-l-[5px] border-l-transparent border-r-[5px] border-r-transparent border-t-[8px] border-t-red-600"></div>
-                            <div className="absolute top-[30px] bottom-0 -left-[10px] w-[20px] bg-red-600/5"></div>
+                            <div className="absolute top-0 left-[-5px] w-0 h-0 border-l-[5px] border-l-transparent border-r-[5px] border-r-transparent border-t-8 border-t-red-600"></div>
+                            <div className="absolute top-[30px] bottom-0 left-[-10px] w-[20px] bg-red-600/5"></div>
                         </div>
                     </div>
                 </div>

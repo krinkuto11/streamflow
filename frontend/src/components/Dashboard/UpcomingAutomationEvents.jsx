@@ -161,7 +161,7 @@ export default function UpcomingAutomationEvents() {
     >
       <div className="min-w-0 flex-1 space-y-2">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="break-words font-medium text-sm">{event.period_name}</span>
+          <span className="wrap-break-word font-medium text-sm">{event.period_name}</span>
           {isNext && <Badge variant="default" className="text-xs">Next</Badge>}
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -169,7 +169,7 @@ export default function UpcomingAutomationEvents() {
             <Clock className="h-3 w-3" />
             {formatDateTime(event.time)}
           </div>
-          <div className="break-words">
+          <div className="wrap-break-word">
             Profiles: {event.profile_display || 'No Profile'}
           </div>
           <div>

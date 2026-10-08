@@ -63,8 +63,8 @@ export default function OperatorHelp() {
                 <Icon className="h-5 w-5 text-primary" />
               </div>
               <div className="min-w-0">
-                <h1 className="break-words text-3xl font-bold tracking-tight">{topic.title}</h1>
-                <p className="max-w-3xl break-words text-muted-foreground">{topic.summary}</p>
+                <h1 className="wrap-break-word text-3xl font-bold tracking-tight">{topic.title}</h1>
+                <p className="max-w-3xl wrap-break-word text-muted-foreground">{topic.summary}</p>
               </div>
             </div>
           </div>
@@ -88,7 +88,7 @@ export default function OperatorHelp() {
                       <CheckCircle2 className="h-4 w-4 text-primary" />
                     )}
                   </div>
-                  <p className="break-words text-sm font-medium">{step}</p>
+                  <p className="wrap-break-word text-sm font-medium">{step}</p>
                 </div>
               ))}
             </div>
@@ -108,7 +108,7 @@ export default function OperatorHelp() {
                     <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-border bg-background text-xs font-semibold text-foreground">
                       {index + 1}
                     </span>
-                    <span className="min-w-0 break-words">{step}</span>
+                    <span className="min-w-0 wrap-break-word">{step}</span>
                   </li>
                 ))}
               </ol>
@@ -124,7 +124,7 @@ export default function OperatorHelp() {
               {topic.settings.map((setting) => (
                 <div key={setting.name} className="min-w-0 rounded-md border border-border p-3">
                   <div className="mb-3 flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                    <h3 className="min-w-0 break-words text-sm font-semibold">{setting.name}</h3>
+                    <h3 className="min-w-0 wrap-break-word text-sm font-semibold">{setting.name}</h3>
                     <Badge variant="secondary" className="w-fit max-w-full whitespace-normal text-left">
                       {setting.controlType || 'Visible UI setting'}
                     </Badge>
@@ -133,7 +133,7 @@ export default function OperatorHelp() {
                     <div className="min-w-0">
                       <dt className="font-medium text-foreground">Where</dt>
                       <dd className="min-w-0 space-y-2">
-                        <span className="block min-w-0 break-words">{setting.location}</span>
+                        <span className="block min-w-0 wrap-break-word">{setting.location}</span>
                         {(setting.locationTo || topic.settingsLocationTo) && (
                           <Button asChild variant="outline" size="sm" className="block w-fit">
                             <Link to={setting.locationTo || topic.settingsLocationTo}>
@@ -146,19 +146,19 @@ export default function OperatorHelp() {
                     </div>
                     <div className="min-w-0">
                       <dt className="font-medium text-foreground">Default</dt>
-                      <dd className="break-words">{setting.defaultValue}</dd>
+                      <dd className="wrap-break-word">{setting.defaultValue}</dd>
                     </div>
                     <div className="min-w-0">
                       <dt className="font-medium text-foreground">Effect</dt>
-                      <dd className="break-words">{setting.effect}</dd>
+                      <dd className="wrap-break-word">{setting.effect}</dd>
                     </div>
                     <div className="min-w-0">
                       <dt className="font-medium text-foreground">Use When</dt>
-                      <dd className="break-words">{setting.useWhen}</dd>
+                      <dd className="wrap-break-word">{setting.useWhen}</dd>
                     </div>
                     <div className="min-w-0">
                       <dt className="font-medium text-foreground">Watch Out</dt>
-                      <dd className="break-words">{setting.risk}</dd>
+                      <dd className="wrap-break-word">{setting.risk}</dd>
                     </div>
                   </dl>
                   {setting.reference ? (
@@ -205,7 +205,7 @@ export default function OperatorHelp() {
               {topic.smokeChecks.map((check) => (
                 <li key={check} className="flex min-w-0 gap-2">
                   <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                  <span className="min-w-0 break-words">{check}</span>
+                  <span className="min-w-0 wrap-break-word">{check}</span>
                 </li>
               ))}
             </ul>
@@ -231,9 +231,9 @@ export default function OperatorHelp() {
         <div className="min-w-0 space-y-1">
           <div className="flex min-w-0 items-center gap-3">
             <CircleHelp className="h-8 w-8 text-primary" />
-            <h1 className="break-words text-3xl font-bold tracking-tight">Help</h1>
+            <h1 className="wrap-break-word text-3xl font-bold tracking-tight">Help</h1>
           </div>
-          <p className="max-w-3xl break-words text-muted-foreground">
+          <p className="max-w-3xl wrap-break-word text-muted-foreground">
             Operational notes for the StreamFlow workflows that operators use most often.
           </p>
         </div>
@@ -247,14 +247,14 @@ export default function OperatorHelp() {
             className="flex min-h-16 min-w-0 items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium"
           >
             <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />
-            <span className="min-w-0 break-words">{check}</span>
+            <span className="min-w-0 wrap-break-word">{check}</span>
           </div>
         ))}
       </div>
 
       <div className="grid min-w-0 gap-3 lg:grid-cols-2">
         {operatorHelpDetailGuidePrinciples.map((principle) => (
-          <div key={principle} className="min-w-0 break-words rounded-md border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+          <div key={principle} className="min-w-0 wrap-break-word rounded-md border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
             {principle}
           </div>
         ))}
@@ -272,8 +272,8 @@ export default function OperatorHelp() {
                     <Icon className="h-5 w-5 text-primary" />
                   </div>
                   <div className="min-w-0">
-                    <CardTitle className="break-words text-xl">{section.title}</CardTitle>
-                    <CardDescription className="break-words">{section.summary}</CardDescription>
+                    <CardTitle className="wrap-break-word text-xl">{section.title}</CardTitle>
+                    <CardDescription className="wrap-break-word">{section.summary}</CardDescription>
                   </div>
                 </div>
               </CardHeader>
@@ -282,7 +282,7 @@ export default function OperatorHelp() {
                   {section.items.map((item) => (
                     <li key={item} className="flex min-w-0 gap-2">
                       <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
-                      <span className="min-w-0 break-words">{item}</span>
+                      <span className="min-w-0 wrap-break-word">{item}</span>
                     </li>
                   ))}
                 </ul>

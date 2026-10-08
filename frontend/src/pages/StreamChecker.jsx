@@ -583,8 +583,8 @@ export default function StreamChecker() {
           <div className="flex min-w-0 items-start gap-2">
             <Info className="mt-0.5 h-4 w-4 flex-none text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="min-w-0 max-w-full break-words font-medium text-foreground">{staleNoticeTitle}</p>
-              <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">
+              <p className="min-w-0 max-w-full wrap-break-word font-medium text-foreground">{staleNoticeTitle}</p>
+              <p className="min-w-0 max-w-full whitespace-normal wrap-anywhere">
                 {staleNoticeText}
                 {Number.isFinite(Number(progressStaleAge)) && (
                   <span className="ml-1">Last update age: {formatDuration(Number(progressStaleAge))}.</span>
@@ -603,15 +603,15 @@ export default function StreamChecker() {
           <div className="flex min-w-0 items-start gap-2">
             <Info className="mt-0.5 h-3.5 w-3.5 flex-none text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">
+              <p className="min-w-0 max-w-full whitespace-normal wrap-anywhere">
                 <span className="font-medium text-foreground">{externalStaleDisplay.title}.</span>{' '}
                 {externalStaleDisplay.text}
               </p>
               {externalStaleDisplay.detail && (
-                <p className="min-w-0 max-w-full whitespace-normal text-xs [overflow-wrap:anywhere]">{externalStaleDisplay.detail}</p>
+                <p className="min-w-0 max-w-full whitespace-normal text-xs wrap-anywhere">{externalStaleDisplay.detail}</p>
               )}
               {externalStaleDisplay.accounts.length > 0 && (
-                <p className="min-w-0 max-w-full whitespace-normal text-xs [overflow-wrap:anywhere]">
+                <p className="min-w-0 max-w-full whitespace-normal text-xs wrap-anywhere">
                   {externalStaleDisplay.accounts.join(' | ')}
                 </p>
               )}
@@ -766,7 +766,7 @@ export default function StreamChecker() {
                                 {profileSlots.slice(0, 5).map((slot) => (
                                   <span
                                     key={slot.id ?? slot.name}
-                                    className={`max-w-[12rem] truncate rounded border px-1.5 py-0.5 text-[10px] leading-none ${
+                                    className={`max-w-48 truncate rounded border px-1.5 py-0.5 text-[10px] leading-none ${
                                       slot.full
                                         ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
                                         : slot.checking > 0
@@ -838,7 +838,7 @@ export default function StreamChecker() {
                               <tbody className="divide-y">
                                 {profileMatrixRows.map((slot) => (
                                   <tr key={slot.key}>
-                                    <td className="max-w-[12rem] truncate px-2 py-2" title={slot.accountName}>
+                                    <td className="max-w-48 truncate px-2 py-2" title={slot.accountName}>
                                       {slot.accountName}
                                     </td>
                                     <td className="max-w-[18rem] px-2 py-2 font-medium" title={slot.title}>

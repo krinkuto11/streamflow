@@ -104,7 +104,7 @@ export function Sidebar({ isCollapsed, setIsCollapsed, navigationDisabled = fals
           else setIsOpen(false)
         }}
         className={cn(
-          'flex min-h-11 items-center gap-3 rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary',
+          'flex min-h-11 items-center gap-3 rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary',
           isActive
             ? 'border-primary/30 bg-primary/15 text-primary dark:text-emerald-200'
             : 'border-transparent text-muted-foreground hover:bg-muted hover:text-foreground',
@@ -175,7 +175,7 @@ export function Sidebar({ isCollapsed, setIsCollapsed, navigationDisabled = fals
 
   return (
     <>
-      <header className="fixed inset-x-0 top-0 z-30 flex h-14 items-center justify-between gap-3 border-b bg-card/95 px-4 backdrop-blur lg:hidden">
+      <header className="fixed inset-x-0 top-0 z-30 flex h-14 items-center justify-between gap-3 border-b bg-card/95 px-4 backdrop-blur-sm lg:hidden">
         <span className="min-w-0 truncate text-sm font-semibold">
           <span className="mr-2 text-primary">StreamFlow</span>
           <span className="text-muted-foreground">/</span> {currentItem.text}
@@ -193,7 +193,7 @@ export function Sidebar({ isCollapsed, setIsCollapsed, navigationDisabled = fals
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/60" />
           <DialogPrimitive.Content
-            className="fixed inset-y-0 left-0 z-50 flex w-72 max-w-[calc(100vw-2rem)] flex-col border-r bg-card shadow-xl outline-none"
+            className="fixed inset-y-0 left-0 z-50 flex w-72 max-w-[calc(100vw-2rem)] flex-col border-r bg-card shadow-xl outline-hidden"
             aria-describedby={undefined}
             onKeyDown={event => {
               // Radix handles Escape during capture. Keep an unhandled key usable
@@ -219,7 +219,7 @@ export function Sidebar({ isCollapsed, setIsCollapsed, navigationDisabled = fals
         </DialogPrimitive.Portal>
       </DialogPrimitive.Root>
 
-      <nav aria-label="Quick navigation" className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t bg-card/95 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden">
+      <nav aria-label="Quick navigation" className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t bg-card/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-sm lg:hidden">
         {primaryNavigation.map(item => {
           const Icon = item.icon
           const active = currentItem.path === item.path
@@ -232,14 +232,14 @@ export function Sidebar({ isCollapsed, setIsCollapsed, navigationDisabled = fals
               aria-disabled={disabled || undefined}
               tabIndex={disabled ? -1 : undefined}
               onClick={event => { if (disabled) event.preventDefault() }}
-              className={cn('flex min-h-16 flex-col items-center justify-center gap-1 text-[10px] font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary', active ? 'text-primary' : 'text-muted-foreground', disabled && 'opacity-40')}
+              className={cn('flex min-h-16 flex-col items-center justify-center gap-1 text-[10px] font-semibold focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-primary', active ? 'text-primary' : 'text-muted-foreground', disabled && 'opacity-40')}
             >
               <Icon className="h-5 w-5" aria-hidden="true" />
               {item.text}
             </Link>
           )
         })}
-        <button type="button" onClick={openNavigation} aria-label="More pages" aria-haspopup="dialog" aria-expanded={isOpen} className={cn('flex min-h-16 flex-col items-center justify-center gap-1 text-[10px] font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary', primaryNavigation.includes(currentItem) ? 'text-muted-foreground' : 'text-primary')}>
+        <button type="button" onClick={openNavigation} aria-label="More pages" aria-haspopup="dialog" aria-expanded={isOpen} className={cn('flex min-h-16 flex-col items-center justify-center gap-1 text-[10px] font-semibold focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-primary', primaryNavigation.includes(currentItem) ? 'text-muted-foreground' : 'text-primary')}>
           <Menu className="h-5 w-5" aria-hidden="true" />
           More
         </button>
