@@ -8,7 +8,7 @@ releases preserve this policy.
 
 | Updates | Target | Policy |
 | --- | --- | --- |
-| Frontend npm versions | `dev` | Check weekly on Monday at 10:00 Europe/Berlin; group runtime and development minor/patch updates separately; review major updates individually. |
+| Frontend npm versions | `dev` | Check weekly on Monday at 10:00 Europe/Berlin; group runtime and development minor/patch updates separately; review major updates individually, except the coupled React family. |
 | GitHub Actions versions | `dev` | Same weekly schedule; group minor/patch updates and review major updates individually. |
 | Frontend / GitHub Actions security fixes | `main` | Dependabot security updates use the default branch; group minor/patch fixes separately by ecosystem and leave major fixes individual. |
 
@@ -25,6 +25,12 @@ CodeQL workflows and receive compatibility review. After merging a security fix
 into `main`, carry the relevant manifest/lockfile or workflow change into `dev`
 so the next release retains the fix. Regular updates reach `main` through the
 normal release process.
+
+React, React DOM, `@types/react`, and `@types/react-dom` share a dedicated group
+for all version updates. Their major versions must remain compatible: upgrading
+React DOM or its types alone can make `npm ci` fail before tests run. Regenerate
+the lockfile together and validate the complete frontend and its live UI;
+never bypass peer conflicts with `--force` or `--legacy-peer-deps`.
 
 Repository administrators must keep Dependabot alerts and security updates
 enabled in **Settings -> Advanced Security -> Dependabot**; the YAML config

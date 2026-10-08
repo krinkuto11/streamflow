@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Project overview and setup documentation** - Refresh README badges, stable/development image guidance, current features, setup locations and example-data screenshots. Document the required Compose `.env` file and persistent volume; mention Dispatcharr's Unraid store availability without installation instructions.
+- **Compatible React updates** - Group React, React DOM and their type packages together for future Dependabot version updates; retain separate review for other major updates.
 - **Dependency update policy** - Schedule grouped npm and GitHub Actions minor/patch updates against `dev`, keep major updates separate, and configure security-only updates against `main`. Document review requirements and the coordinated Python lockfile/media-image update process.
 
 ## [2.7.0] - 2026-10-08
