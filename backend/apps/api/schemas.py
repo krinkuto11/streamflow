@@ -50,10 +50,11 @@ class BackupReviewConfirmRequest:
     mappings: Dict[str, Any]
 
     @classmethod
-    def from_payload(cls, payload):
+    def from_payload(cls, payload, *, preview=False):
         import re
         from apps.backups.inventory import KINDS
-        if not isinstance(payload, dict) or set(payload) != {'confirm','token','mappings'} or payload['confirm'] is not True:
+        fields = {'token','mappings'} if preview else {'confirm','token','mappings'}
+        if not isinstance(payload, dict) or set(payload) != fields or (not preview and payload['confirm'] is not True):
             raise ValidationError('Explicit assignment confirmation is required')
         token = payload['token']
         mappings = payload['mappings']

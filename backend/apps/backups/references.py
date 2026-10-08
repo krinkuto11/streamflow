@@ -45,7 +45,9 @@ def visit(value, key, callback, depth=0):
         # Explicit provider restrictions must never become an unrestricted empty list.
         for field in ('m3u_accounts', 'm3u_account_ids'):
             if isinstance(value.get(field), list) and value[field] and not visit(value[field], field, callback, depth + 1):
-                return None
+                if 'enabled' not in value:
+                    return None
+                value = {**value, 'enabled': False}
         if identifier(value.get('channel_id')) is not None and callback('channels', value['channel_id']) is None:
             return None
         scopes = ('channel_ids', 'channel_group_ids', 'included_channel_ids', 'included_channel_uuids')
@@ -98,8 +100,7 @@ def referenced_ids(db, root):
     return result
 
 
-def rewrite_configuration(db, root, mappings, *, foreign):
-    from apps.core.atomic_json import atomic_write_json
+def configuration_rewrites(db, root, mappings):
     def mapped(kind, value):
         if kind == 'channel_uuids':
             return mappings[kind].get(value)
@@ -110,15 +111,37 @@ def rewrite_configuration(db, root, mappings, *, foreign):
         return str(target) if isinstance(value, str) and target is not None else target
     for origin, key, value in list(configuration_records(db, root)):
         rewritten = visit(value, str(key).removesuffix('.json'), mapped)
+        disable = False
+        if rewritten is None and value is not None:
+            if origin in ('automation_profiles', 'automation_periods'):
+                rewritten = visit({**value, 'enabled': True}, '', mapped)
+                if rewritten is not None:
+                    rewritten.pop('enabled', None)
+                    disable = True
+            if rewritten is None:
+                raise ValueError('Skipping this assignment would remove a configuration scope; choose a target instead')
+        if key == 'stream_checker_config' and isinstance(rewritten, dict):
+            queue = rewritten.get('queue') or {}
+            if queue.get('start_mode') == 'channel' and queue.get('start_channel_id') is None:
+                # A skipped start channel falls back to the normal first channel.
+                queue['start_mode'] = 'first'
+        if origin == 'setting' and key == 'enabled_m3u_accounts' and value and not rewritten:
+            raise ValueError('Select at least one target for the enabled-provider filter; dropping all would broaden automation')
+        yield origin, key, rewritten, disable
+
+
+def rewrite_configuration(db, root, mappings, *, foreign):
+    from apps.core.atomic_json import atomic_write_json
+    for origin, key, rewritten, disable in configuration_rewrites(db, root, mappings):
         if origin == 'setting':
-            if key == 'enabled_m3u_accounts' and value and not rewritten:
-                raise ValueError('Select at least one target for the enabled-provider filter; dropping all would broaden automation')
             db.execute('UPDATE system_settings SET value=? WHERE key=?', (json.dumps(rewritten), key))
         elif origin == 'file':
             atomic_write_json(root / key, rewritten, backup=False)
         else:
             field = 'variables' if origin == 'match_profile_steps' else 'extra_settings'
             db.execute(f'UPDATE {origin} SET {field}=? WHERE id=?', (json.dumps(rewritten), key))
+            if disable:
+                db.execute(f'UPDATE {origin} SET enabled=0 WHERE id=?', (key,))
     configs = db.execute('SELECT channel_id,name,enabled,match_by_tvg_id FROM channel_regex_configs').fetchall()
     patterns = db.execute('SELECT id,channel_id,pattern,m3u_accounts,step_order FROM channel_regex_patterns').fetchall()
     db.execute('DELETE FROM channel_regex_patterns'); db.execute('DELETE FROM channel_regex_configs')

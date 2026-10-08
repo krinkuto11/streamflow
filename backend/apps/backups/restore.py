@@ -75,6 +75,18 @@ def _safe_file(root, name):
     return target
 
 
+def cancel_prepared_restore(config_dir):
+    """Remove an unapplied stage if approval cannot be saved durably."""
+    root = Path(config_dir).resolve()
+    journal = read_json(root / PENDING)
+    if journal.get('phase') != 'prepared':
+        raise ValueError('Only an unapplied restore may be cancelled')
+    stage = _stage_path(root, journal['stage'])
+    (root / PENDING).unlink()
+    sync_directory(root)
+    shutil.rmtree(stage)
+
+
 def _rollback(root, stage, journal):
     for name in journal['targets']:
         target = _safe_file(root, name)

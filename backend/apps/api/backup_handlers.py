@@ -91,6 +91,12 @@ def create_backup_blueprint(service_provider):
         payload = BackupReviewConfirmRequest.from_payload(request.get_json(silent=True))
         return success_response(service_provider().confirm_review(payload.token, payload.mappings), status_code=202)
 
+    @blueprint.post('/review/preview')
+    @handled
+    def preview():
+        payload = BackupReviewConfirmRequest.from_payload(request.get_json(silent=True), preview=True)
+        return success_response(service_provider().preview_review(payload.token, payload.mappings))
+
     @blueprint.get('/<name>/inspect')
     @handled
     def inspect(name):

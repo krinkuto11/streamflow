@@ -77,7 +77,8 @@ def validate_inventory(value):
 
 
 def inventory_token(value, connection_identity=''):
-    return fingerprint(json.dumps(value, sort_keys=True, separators=(',', ':')) + connection_identity)
+    canonical = {**value, **{kind: sorted(value[kind], key=lambda row: row['id']) for kind in KINDS}}
+    return fingerprint(json.dumps(canonical, sort_keys=True, separators=(',', ':')) + connection_identity)
 
 
 def capture_inventory():
@@ -102,6 +103,9 @@ def fetch_inventory():
             result = super()._fetch_url(url)
             if result is None:
                 raise ValueError('Dispatcharr inventory could not be fetched completely; automation remains paused')
+            if isinstance(result, dict) and (not isinstance(result.get('results'), list)
+                    or type(result.get('count')) is not int or result['count'] < 0):
+                raise ValueError('Dispatcharr returned invalid paginated inventory')
             return result
 
     fetcher = StrictFetcher()

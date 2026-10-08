@@ -10,6 +10,7 @@ import { Switch } from '@/components/ui/switch.jsx'
 import { Alert, AlertDescription } from '@/components/ui/alert.jsx'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog.jsx'
 import { createSequentialPoller } from '@/lib/sequential-poller.js'
+import RestoreReview from '@/components/backups/RestoreReview.jsx'
 
 const selectClass = 'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm'
 const weekdays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
@@ -110,6 +111,7 @@ export default function Backups() {
     } catch (err) { setError(message(err)) }
     finally { setWorking(false) }
   }
+  const restartFromReview = operation => { restartStarted.current = operation.started_at * 1000; setRestarting(true) }
 
   return <div className="space-y-6">
     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -120,6 +122,7 @@ export default function Backups() {
     {notice && <Alert role="status"><AlertDescription>{notice}</AlertDescription></Alert>}
     {restarting && <Alert role="status"><AlertDescription>Restoring and restarting StreamFlow. This page will reconnect automatically. If it cannot reconnect, check the container log before restarting it.</AlertDescription></Alert>}
     {!status || !config ? <p role="status">Loading backups…</p> : <>
+      {status.restore_review?.pending && <RestoreReview review={status.restore_review} disabled={disabled} run={run} onRestart={restartFromReview} />}
       <Card>
         <CardHeader><CardTitle>Create or upload</CardTitle><CardDescription>Includes settings, profiles, regex rules and stored connection credentials. Keep backup files private. Credentials supplied through container variables or secret files stay in your container configuration.</CardDescription></CardHeader>
         <CardContent className="space-y-4">
@@ -170,7 +173,7 @@ export default function Backups() {
     </>}
     <p className="text-sm"><Link className="text-primary underline" to="/">Back to dashboard or setup</Link></p>
     <Dialog open={Boolean(preview)} onOpenChange={open => { if (!open && !working) setPreview(null) }}>
-      <DialogContent><DialogHeader><DialogTitle>Restore verified backup?</DialogTitle><DialogDescription>This replaces the current StreamFlow settings, regex rules, profiles and stored connections. StreamFlow saves a safety backup first, then restarts. It does not restore Dispatcharr or resume monitoring sessions.</DialogDescription></DialogHeader>
+      <DialogContent><DialogHeader><DialogTitle>Restore verified backup?</DialogTitle><DialogDescription>This replaces the current StreamFlow settings, regex rules, profiles and stored connections. StreamFlow saves a safety backup first, then restarts. Automatic work remains paused until Dispatcharr assignments are reviewed and confirmed. It does not restore Dispatcharr or resume monitoring sessions.</DialogDescription></DialogHeader>
         {preview && <div className="space-y-2 text-sm"><p className="break-all font-medium">{preview.name}</p><p>Created: {date(preview.created_at)} · Version: {preview.version}</p><p>{preview.include_history ? 'Includes measurement history.' : 'Configuration only: current measurement history will be removed.'}</p><dl className="grid grid-cols-2 gap-2">{Object.entries(preview.summary || {}).map(([key, value]) => <div key={key}><dt className="text-muted-foreground">{key.replaceAll('_', ' ')}</dt><dd>{value}</dd></div>)}</dl></div>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         <DialogFooter><Button variant="outline" disabled={working} onClick={() => setPreview(null)}>Cancel</Button><Button variant="destructive" disabled={working} onClick={restore}>Restore and restart</Button></DialogFooter>

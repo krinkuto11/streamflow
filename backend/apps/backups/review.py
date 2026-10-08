@@ -6,7 +6,7 @@ from contextlib import closing
 from pathlib import Path
 
 from apps.backups.inventory import KINDS, INVENTORY_FILE, identifier, fingerprint, validate_inventory
-from apps.backups.references import referenced_ids, rewrite_configuration, configuration_records, visit
+from apps.backups.references import referenced_ids, rewrite_configuration, configuration_records, configuration_rewrites, visit
 
 
 def load_source(root):
@@ -120,7 +120,7 @@ def history_maps(source, current, mappings):
     return trusted_channels, streams
 
 
-def apply_mappings(root, source, current, mappings):
+def mapping_context(root, source, current, mappings):
     root = Path(root)
     mappings = validate_mappings(root, source, current, mappings)
     channels, streams = history_maps(source, current, mappings)
@@ -132,6 +132,31 @@ def apply_mappings(root, source, current, mappings):
                                and (target := mappings['channels'].get(row['id'])) in target_by_id['channels']}
     foreign = not (root / INVENTORY_FILE).exists() or any(target != old or (kind in ('providers','channels') and not same_identity(source_by_id[kind].get(old, {}), target_by_id[kind].get(target, {})))
                   for kind in KINDS[:-1] for old, target in mappings[kind].items())
+    # Monitoring snapshots embed stream IDs as well as channel/provider IDs.
+    # Keep them only when every saved stream still has its verified original ID.
+    foreign = foreign or any(streams.get(row['id']) != row['id'] for row in source['streams'])
+    return mappings, channels, streams, foreign, source_by_id
+
+
+def preview_mappings(root, source, current, mappings):
+    mappings, channels, streams, foreign, source_by_id = mapping_context(root, source, current, mappings)
+    counts = {}
+    with closing(sqlite3.connect(Path(root) / 'streamflow.db')) as db:
+        # Validate scopes before offering confirmation; this path never writes.
+        list(configuration_rewrites(db, Path(root), mappings))
+        for table in ('stream_telemetry', 'playback_observations'):
+            fields = 'channel_id,stream_id' + (',source_fingerprint' if table == 'playback_observations' else '')
+            rows = db.execute(f'SELECT {fields} FROM {table}').fetchall()
+            kept = sum(row[0] in channels and row[1] in streams and
+                       (table != 'playback_observations' or row[2] == source_by_id['streams'].get(row[1], {}).get('identity')) for row in rows)
+            counts[table] = {'kept': kept, 'removed': len(rows) - kept}
+    return {'foreign': foreign, 'history': counts, 'skipped_assignments': sum(target is None for kind in KINDS[:-1] for target in mappings[kind].values()),
+            'monitoring_history_kept': not foreign}
+
+
+def apply_mappings(root, source, current, mappings):
+    root = Path(root)
+    mappings, channels, streams, foreign, source_by_id = mapping_context(root, source, current, mappings)
     counts = {}
     with closing(sqlite3.connect(root / 'streamflow.db')) as db:
         for table in ('stream_telemetry', 'playback_observations'):

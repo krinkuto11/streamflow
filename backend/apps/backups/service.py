@@ -57,6 +57,10 @@ class BackupService:
         from apps.backups.review_workflow import confirm
         return confirm(self, token, mappings)
 
+    def preview_review(self, token, mappings):
+        from apps.backups.review_workflow import preview
+        return preview(self, token, mappings)
+
     def update_review_connection(self, settings):
         from apps.backups.review_workflow import update_connection
         return update_connection(self, settings)
