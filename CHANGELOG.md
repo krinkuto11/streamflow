@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Matrix appearance** - Additional black/charcoal palette with green accents in the appearance menu; retains semantic status colors and the existing layouts. See [theme details](docs/matrix-theme.md).
+- **Preflight and control-plane efficiency** - Added a [technical dev changelog](docs/dev-efficiency-changelog-20261002.md) covering checkpoint catch-up, queue validation, metadata reads, conditional status polling, and validation results.
 - **PR #460 change record** - Added a [detailed changelog](docs/pr460-changelog.md) for the reliability, efficiency, security and responsive UI changes proposed against `dev`.
 - **Monitoring intervals** - Monitoring-session create requests now accept bounded evaluation and enforcement intervals (both default to 1,000 ms).
 - **Channel context and UI previews** - Compact Channel rows show effective automation profile state, and six synthetic-data desktop/mobile screenshots document the implemented Dashboard, Channels and Monitoring views.
@@ -20,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Automation run stream health metrics** - Added a dashboard `Good Streams` metric and a compact `Checking now` row for active quality batches.
 
 ### Changed
+- **Stream Checker decomposition** - Move checker responsibilities into focused modules while preserving the public service, shared state, ownership tokens and lock ordering; see the [architecture map](docs/stream-checker-architecture.md).
+- **Dashboard quick metrics** - Show Channels Restored beside Channels Hidden using the same run counters as the detailed metrics, with five columns on wide screens and wrapping on smaller displays.
+- **Preflight admission** - Catch up to the newest crossed checkpoint, retry missing streams within bounded windows, and revalidate queued event/channel identity before execution. Catalog refreshes run separately with a short metadata cache.
+- **Control-plane and UI work** - Reuse thread-owned HTTP connections, coalesce concurrent channel reads, detect stable-ID source changes, revalidate status with ETags, pause serial browser polling when hidden, and render visible stream rows with isolated countdowns.
+- **Checker responsibilities** - Extract queue execution and statistics writing, share acknowledged per-stream write handling, use monotonic durations, and expose separate bounded timing summaries.
 - **Dispatcharr-aligned media tools** - Production and development images use the same pinned LinuxServer FFmpeg/ffprobe 8.1.2 build as the installed Dispatcharr image, with Python 3.11 in a separate virtual environment and the CPU container default retained.
 - **Core workspace and startup** - Dashboard, Channels and Monitoring use compact responsive layouts and accessible mobile navigation. Configured instances bootstrap from readiness instead of waiting for the setup-wizard connection diagnostic on each page load.
 - **Operator-facing progress and setup wording** - Clarified Stream Checker ETA labels, dashboard run counters, startup duration estimates, Teamarr timing buckets, Shadow Monitor switch limits, and Help `Where` locations.
@@ -31,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stream Checker ETA wording** - Provider-limited or floor-based estimates now display as `Rough ETA` with a tooltip explaining expected swings between long channel waits.
 
 ### Fixed
+- **Stream progress table on narrow screens** - Keep virtualized columns readable with a minimum table width and horizontal scrolling instead of overlapping account, status, countdown and quality cells.
+- **Ambiguous creation responses** - Reconcile newly created channels after uncertain POST outcomes and suppress unconfirmed non-idempotent replays. Legacy changelog memory is bounded.
 - **Reported old streams retained after a check** - Stream-limit removals were misread as UDI cache misses and appended again. Concurrent and sequential write-back now protect genuine cache misses, then enforce the limit while preserving active-viewer streams; the original reporter's instance remains unverified.
 - **PR #460 run and assignment correctness** - Matching worker, validation, inventory and Dispatcharr write failures report failure; single-channel Step 4/5/6 errors stop later work. Channel assignments use per-channel serialization, authoritative preflight and readback.
 - **Manual Discover Streams response** - A successful structured discovery result now returns validated assignment counts in the existing response shape instead of failing when the result contains assigned channels.
@@ -70,6 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Narrower browser work** - Single-channel matching evaluates one channel's rules; Stream Checker avoids redundant progress/settings requests, and Monitoring loads charts and details when opened. Earlier path benchmarks and their scope are in the [PR #460 changelog](docs/pr460-changelog.md).
 
 ### Security
+- **HTTP dependency lock** - Update the production and test `urllib3` hash locks to 2.8.0 to resolve the dependency audit findings.
 - **Bounded logo retrieval** - Logo URLs, redirects, response type and image bytes are validated before caching; local/metadata targets are restricted, the cache is bounded, and cached SVG/image responses receive defensive headers while supported LAN and Dispatcharr-relative logos remain usable.
 - **Safe API error responses** - Rejected logos return a generic 422 message. Manual stream discovery exposes validated numeric assignment counts on success and generic 409/500 failure responses with a safe partial-write flag, without echoing provider URLs or internal exception detail.
 

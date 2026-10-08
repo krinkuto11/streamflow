@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AbstractSet, Callable, Dict, Iterable, List, Optional, Tuple, Any, Union
 import concurrent.futures
-from collections import defaultdict
+from collections import defaultdict, deque
 
 # Pre-compiled regex pattern for whitespace conversion (performance optimization)
 # This pattern matches one or more spaces that are NOT preceded by a backslash
@@ -158,7 +158,7 @@ class ChangelogManager:
         if changelog_file is None:
             changelog_file = CONFIG_DIR / "changelog.json"
         self.changelog_file = Path(changelog_file)
-        self.changelog = [] # deprecated but kept for backwards comp
+        self.changelog = deque(maxlen=200) # bounded compatibility view; SQL retains history
     
     def _load_changelog(self) -> List[Dict]:
         """Deprecated."""

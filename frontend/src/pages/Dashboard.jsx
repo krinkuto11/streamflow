@@ -7,6 +7,7 @@ import { Progress } from '@/components/ui/progress.jsx'
 import { Alert, AlertDescription } from '@/components/ui/alert.jsx'
 import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
+import { useVisiblePolling } from '@/hooks/use-visible-polling.js'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, viewerActivityAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
 import { getDashboardRunMetrics } from '@/lib/dashboard-run-counts.js'
@@ -139,69 +140,31 @@ export default function Dashboard() {
   const { toast } = useToast()
 
   useEffect(() => {
-    setDashboardNow(Date.now())
-    loadStatus()
-    loadSecondaryStatus()
-    loadLiveContext()
-    loadPlaylists()
     loadPeriods()
     loadEnvironment()
-    loadUdiStats()
-
-    let statusTimer
-    let stopped = false
-    const scheduleStatus = (delayMs = activeRunRef.current ? LIVE_STATUS_POLL_MS : IDLE_STATUS_POLL_MS) => {
-      if (stopped) return
-      statusTimer = setTimeout(async () => {
-        if (document.visibilityState === 'visible') {
-          setDashboardNow(Date.now())
-          await loadStatus()
-        }
-        scheduleStatus()
-      }, delayMs)
-    }
-    scheduleStatus(LIVE_STATUS_POLL_MS)
-
-    const onVisibilityChange = () => {
-      if (document.visibilityState !== 'visible') return
-      setDashboardNow(Date.now())
-      loadStatus()
-      loadSecondaryStatus()
-      loadLiveContext()
-      loadUdiStats()
-    }
-    document.addEventListener('visibilitychange', onVisibilityChange)
-
-    const backgroundInterval = setInterval(() => {
-      if (document.visibilityState !== 'visible') return
-      loadSecondaryStatus()
-      loadPlaylists()
-      loadUdiStats()
-    }, BACKGROUND_DATA_POLL_MS)
-    const liveContextInterval = setInterval(() => {
-      if (document.visibilityState === 'visible') loadLiveContext()
-    }, 5000)
-
-    return () => {
-      stopped = true
-      clearTimeout(statusTimer)
-      clearInterval(backgroundInterval)
-      clearInterval(liveContextInterval)
-      document.removeEventListener('visibilitychange', onVisibilityChange)
-    }
   }, [])
 
-  const loadStatus = async () => {
+  useVisiblePolling(async signal => {
+    setDashboardNow(Date.now())
+    await loadStatus(signal)
+  }, () => activeRunRef.current ? LIVE_STATUS_POLL_MS : IDLE_STATUS_POLL_MS)
+  useVisiblePolling(signal => Promise.allSettled([
+    loadSecondaryStatus(signal), loadPlaylists(signal), loadUdiStats(signal),
+  ]), BACKGROUND_DATA_POLL_MS)
+  useVisiblePolling(signal => loadLiveContext(signal), 5000)
+
+  const loadStatus = async (signal) => {
     if (statusPollInFlight.current) {
       return
     }
     statusPollInFlight.current = true
     try {
       const [automationResult, streamCheckerResult] = await Promise.allSettled([
-        automationAPI.getStatus(),
-        streamCheckerAPI.getStatus(),
+        automationAPI.getStatus(signal ? { signal } : undefined),
+        streamCheckerAPI.getStatus(signal ? { signal } : undefined),
       ])
 
+      if (signal?.aborted) return
       if (automationResult.status === 'fulfilled') {
         setStatus(automationResult.value.data)
       }
@@ -233,6 +196,7 @@ export default function Dashboard() {
         )
       }
     } catch (err) {
+      if (signal?.aborted) return
       console.error('Failed to load status:', err)
     } finally {
       statusPollInFlight.current = false
@@ -240,23 +204,26 @@ export default function Dashboard() {
     }
   }
 
-  const loadSecondaryStatus = async () => {
+  const loadSecondaryStatus = async (signal) => {
     try {
-      const response = await automationAPI.getConfig()
+      const response = await automationAPI.getConfig(signal ? { signal } : undefined)
+      if (signal?.aborted) return
       setAutomationConfig(response.data || {})
     } catch (error) {
+      if (signal?.aborted) return
       console.warn('Failed to load automation configuration:', error)
     }
   }
 
-  const loadLiveContext = async () => {
+  const loadLiveContext = async (signal) => {
     if (liveContextInFlight.current) return
     liveContextInFlight.current = true
     try {
       const [shadowResult, viewersResult] = await Promise.allSettled([
-        shadowBlankMonitorAPI.getStatus(),
-        viewerActivityAPI.getStatus(),
+        shadowBlankMonitorAPI.getStatus(signal ? { signal } : undefined),
+        viewerActivityAPI.getStatus(signal ? { signal } : undefined),
       ])
+      if (signal?.aborted) return
       if (shadowResult.status === 'fulfilled') setShadowMonitorStatus(shadowResult.value.data)
       if (viewersResult.status === 'fulfilled') setViewerActivityStatus(viewersResult.value.data)
     } finally {
@@ -264,9 +231,10 @@ export default function Dashboard() {
     }
   }
 
-  const loadUdiStats = async () => {
+  const loadUdiStats = async (signal) => {
     try {
-      const response = await dispatcharrAPI.getInitializationStatus()
+      const response = await dispatcharrAPI.getInitializationStatus(signal ? { signal } : undefined)
+      if (signal?.aborted) return
       const data = response.data || {}
       const ec = data.entity_counts || {}
       const counts = {
@@ -285,15 +253,18 @@ export default function Dashboard() {
         })
       }
     } catch (err) {
+      if (signal?.aborted) return
       console.error('UDI status poll error:', err)
     }
   }
 
-  const loadPlaylists = async () => {
+  const loadPlaylists = async (signal) => {
     try {
-      const response = await m3uAPI.getAccounts()
+      const response = await m3uAPI.getAccounts(signal ? { signal } : undefined)
+      if (signal?.aborted) return
       setPlaylists(response.data.accounts || [])
     } catch (err) {
+      if (signal?.aborted) return
       console.error('Failed to load playlists:', err)
     }
   }
@@ -819,7 +790,7 @@ export default function Dashboard() {
   const visibleViewerChannels = viewerChannels.slice(0, 6)
   const hiddenViewerChannelCount = Math.max(0, viewerChannels.length - visibleViewerChannels.length)
   const latestRecordedRun = runHistoryBaseline.latest
-  const overviewMetrics = displayRunMetrics.filter(metric => ['checked', 'good', 'dead', 'hidden'].includes(metric.key))
+  const overviewMetrics = displayRunMetrics.filter(metric => ['checked', 'good', 'dead', 'hidden', 'ready'].includes(metric.key))
 
   const syncBadgeClass =
     syncStatus === 'completed' ? 'bg-green-600 text-white border-transparent' :
@@ -989,7 +960,7 @@ export default function Dashboard() {
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-3 border-t pt-4 sm:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 border-t pt-4 sm:grid-cols-3 lg:grid-cols-5">
               {overviewMetrics.map(metric => (
                 <div key={metric.key} className="min-w-0" title={metric.description}>
                   <div className="text-xs text-muted-foreground">{metric.label}</div>

@@ -12,6 +12,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.j
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from '@/components/ui/pagination.jsx'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
+import { useVisiblePolling } from '@/hooks/use-visible-polling.js'
+import { StreamCountdown } from '@/components/StreamCountdown.jsx'
+import { VirtualStreamRows } from '@/components/VirtualStreamRows.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
@@ -60,7 +63,6 @@ export default function StreamChecker() {
   const [hardwareStatus, setHardwareStatus] = useState(null)
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
-  const [tick, setTick] = useState(0) // drives countdown re-renders — value never rendered
   const [configEditing, setConfigEditing] = useState(false)
   const [editedConfig, setEditedConfig] = useState(null)
   const [deadStreams, setDeadStreams] = useState([])
@@ -80,43 +82,21 @@ export default function StreamChecker() {
   const activeCheckRef = useRef(false)
   const { toast } = useToast()
 
-  useEffect(() => {
-    loadData()
-    let stopped = false
-    let timer
-    const poll = async () => {
-      if (document.visibilityState === 'visible') await loadData(false)
-      if (!stopped) timer = setTimeout(poll, activeCheckRef.current ? 1000 : 5000)
-    }
-    timer = setTimeout(poll, 1000)
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') void loadData(false)
-    }
-    document.addEventListener('visibilitychange', onVisibilityChange)
-    return () => {
-      stopped = true
-      clearTimeout(timer)
-      document.removeEventListener('visibilitychange', onVisibilityChange)
-    }
-  }, [])
+  const initialPollLoaded = useRef(false)
+  useVisiblePolling(async signal => {
+    await loadData(!initialPollLoaded.current, signal)
+    if (!signal.aborted) initialPollLoaded.current = true
+  }, () => activeCheckRef.current ? 1000 : 5000)
 
   useEffect(() => {
     loadStartChannels()
   }, [])
 
-  // Tick every second to drive per-stream countdown cells
-  // The tick value itself is never rendered — it triggers re-renders so
-  // each countdown cell recalculates from Date.now() fresh each second.
-  useEffect(() => {
-    if (!(status?.stream_checking_mode || status?.checking || status?.queue?.queue_size > 0 || status?.queue?.in_progress > 0)) return undefined
-    const timer = setInterval(() => setTick(t => t + 1), 1000)
-    return () => clearInterval(timer)
-  }, [status?.stream_checking_mode, status?.checking, status?.queue?.queue_size, status?.queue?.in_progress])
-
-  const loadData = async (includeSettings = true) => {
+  const loadData = async (includeSettings = true, signal) => {
     try {
       const { statusResult, progressResult, configResult, hardwareResult } =
-        await loadStreamCheckerPoll(streamCheckerAPI, includeSettings)
+        await loadStreamCheckerPoll(streamCheckerAPI, includeSettings, signal ? { signal } : undefined)
+      if (signal?.aborted) return
       if (statusResult.status === 'fulfilled') {
         const latestStatus = statusResult.value.data
         setStatus(latestStatus)
@@ -948,7 +928,8 @@ export default function StreamChecker() {
                 <div className="mt-4">
                   <Label className="text-sm font-semibold mb-2 block">Stream Progress Tracking</Label>
                   <div className="rounded-md border overflow-y-auto w-full" style={{ maxHeight: `${tableMaxHeight}px` }}>
-                    <table className="w-full text-sm text-left">
+                    <table className="w-full min-w-[800px] text-sm text-left table-fixed" aria-rowcount={sortedStreams.length + 1}>
+                      <colgroup>{[28, 16, 18, 12, 18, 8].map((width, index) => <col key={index} style={{ width: `${width}%` }} />)}</colgroup>
                       <thead className="bg-muted sticky top-0 z-10 text-xs text-muted-foreground uppercase h-8">
                         <tr>
                           <th className="px-3 py-1 font-medium">Stream</th>
@@ -959,25 +940,8 @@ export default function StreamChecker() {
                           <th className="px-3 py-1 font-medium text-right">Score</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y">
-                        {sortedStreams.map((stream) => {
-                          // Per-stream countdown: counts down from stream_duration
-                          // using only client-side time — no backend tracking needed.
+                      <VirtualStreamRows items={sortedStreams} renderRow={(stream) => {
                           const isActive = stream.status === 'checking' || stream.status === 'probing'
-                          let countdownCell = <span className="text-muted-foreground">-</span>
-                          if (isActive && stream.started_at && progress.stream_duration) {
-                            const elapsed = Math.floor((Date.now() - new Date(stream.started_at).getTime()) / 1000)
-                            const remaining = Math.max(0, progress.stream_duration - elapsed)
-                            if (remaining === 0) {
-                              countdownCell = <span className="text-muted-foreground/50">--</span>
-                            } else {
-                              countdownCell = (
-                                <span className={remaining <= 10 ? 'text-amber-500 font-mono text-xs' : 'text-muted-foreground font-mono text-xs'}>
-                                  {formatDuration(remaining)}
-                                </span>
-                              )
-                            }
-                          }
                           const qualityReason = getQualityReasonDisplay(stream)
                           const showMeasuredSpecs = ['completed', 'incomplete_bitrate', 'loop_detected', 'low_quality', 'dead', 'blank', 'freeze'].includes(stream.status)
                           const reservedProfileTitle = [
@@ -1051,7 +1015,7 @@ export default function StreamChecker() {
                                 )}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-right">
-                                {countdownCell}
+                                <StreamCountdown active={isActive} startedAt={stream.started_at} duration={progress.stream_duration} />
                               </td>
                               <td className="px-3 py-1.5 align-middle text-right text-xs text-muted-foreground whitespace-nowrap">
                                 {showMeasuredSpecs ? (
@@ -1073,8 +1037,7 @@ export default function StreamChecker() {
                               </td>
                             </tr>
                           )
-                        })}
-                      </tbody>
+                        }} />
                     </table>
                   </div>
                 </div>
