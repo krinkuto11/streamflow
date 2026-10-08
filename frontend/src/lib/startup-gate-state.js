@@ -65,5 +65,5 @@ export const shouldRedirectForStartupGate = ({
 }) => {
   if (!setupComplete || !initializationChecked) return false
   if (!initialization?.inProgress) return false
-  return pathname !== '/' && pathname !== '/dashboard'
+  return !['/', '/dashboard', '/backups'].includes(pathname)
 }

@@ -44,6 +44,21 @@ api.interceptors.response.use(
 );
 
 // API methods
+export const backupsAPI = {
+  getStatus: (options) => api.get('/backups', options),
+  saveConfig: (config) => api.put('/backups/config', config),
+  create: (includeHistory) => api.post('/backups', { include_history: includeHistory }),
+  inspect: (name) => api.get(`/backups/${encodeURIComponent(name)}/inspect`, { timeout: 0 }),
+  restore: (name) => api.post(`/backups/${encodeURIComponent(name)}/restore`, { confirm: true }, { timeout: 0 }),
+  delete: (name) => api.delete(`/backups/${encodeURIComponent(name)}`, { data: { confirm: true } }),
+  download: (name) => api.get(`/backups/${encodeURIComponent(name)}/download`, { responseType: 'blob', timeout: 0 }),
+  upload: (file) => {
+    const data = new FormData();
+    data.append('file', file);
+    return api.post('/backups/upload', data, { headers: { 'Content-Type': undefined }, timeout: 0 });
+  },
+};
+
 export const automationAPI = {
   // Status and Control
   getStatus: (options) => api.get('/automation/status', options),

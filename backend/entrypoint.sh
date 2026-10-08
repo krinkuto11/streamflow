@@ -12,12 +12,13 @@ API_HOST="${API_HOST:-0.0.0.0}"
 API_PORT="${API_PORT:-5000}"
 DEBUG_MODE="${DEBUG_MODE:-false}"
 CONFIG_DIR="${CONFIG_DIR:-/app/data}"
+BACKUP_DIR="${BACKUP_DIR:-$CONFIG_DIR/backups}"
 PUID="${PUID:-99}"
 PGID="${PGID:-100}"
 STREAMFLOW_RUN_AS_ROOT="${STREAMFLOW_RUN_AS_ROOT:-false}"
 
 # Export environment variables for the Flask application
-export API_HOST API_PORT DEBUG_MODE CONFIG_DIR
+export API_HOST API_PORT DEBUG_MODE CONFIG_DIR BACKUP_DIR
 
 run_as_root=false
 case "${STREAMFLOW_RUN_AS_ROOT,,}" in
@@ -42,8 +43,11 @@ if [ "$(id -u)" = "0" ] && [ "$run_as_root" != "true" ]; then
     if [ -z "$existing_user" ] || [ "$existing_user" = "streamflow" ]; then
         usermod --uid "$PUID" --gid "$PGID" streamflow
     fi
-    mkdir -p csv logs "$CONFIG_DIR"
+    mkdir -p csv logs "$CONFIG_DIR" "$BACKUP_DIR"
     chown -R "$PUID:$PGID" csv logs "$CONFIG_DIR"
+    chown "$PUID:$PGID" "$BACKUP_DIR"
+    find "$BACKUP_DIR" -maxdepth 1 -type f -name 'streamflow-*.zip' -exec chown "$PUID:$PGID" {} + -exec chmod 600 {} +
+    chmod 700 "$BACKUP_DIR"
     chmod 700 csv logs "$CONFIG_DIR"
     find "$CONFIG_DIR" -maxdepth 1 -type f -exec chmod 600 {} +
     echo "[INFO] Dropping runtime privileges to ${PUID}:${PGID}."
@@ -61,7 +65,7 @@ fi
 echo "[INFO] Checking configuration files..."
 
 # Ensure required directories exist (including the persisted data directory)
-mkdir -p csv logs "$CONFIG_DIR"
+mkdir -p csv logs "$CONFIG_DIR" "$BACKUP_DIR"
 echo "[INFO] Config directory: $CONFIG_DIR"
 
 # Validate environment setup
@@ -80,6 +84,8 @@ echo "[INFO] ============================================"
 
 # Start Flask API directly
 echo "[INFO] Running configuration migrations..."
+export PYTHONPATH=.
+python3 -c 'from apps.backups.restore import apply_pending_restore; import os; apply_pending_restore(os.environ["CONFIG_DIR"])'
 python3 scripts/migrate_to_sql.py
 
 export PYTHONPATH=.

@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Monitoring regex composition (#379)** - Multiple channel patterns with leading Python inline flags now scope those flags to their own alternatives instead of failing compilation. Single patterns, stored rules, branch order, and the regular provider-aware matching path retain their existing behavior.
 
 ### Added
+- **Backup and restore** - Add a dedicated Backups page, manual backups, daily/weekly/hourly schedules, retention, verified uploads/downloads and offline restoration with a pre-restore safety backup and crash recovery. Back up SQL settings, profiles, provider-specific regex rules, stored connections and optional measurement history. `BACKUP_DIR` supports an independently mounted storage folder.
 - **Matrix appearance** - Additional black/charcoal palette with green accents in the appearance menu; retains semantic status colors and the existing layouts. See [theme details](docs/matrix-theme.md).
 - **Preflight and control-plane efficiency** - Added a [technical dev changelog](docs/dev-efficiency-changelog-20261002.md) covering checkpoint catch-up, queue validation, metadata reads, conditional status polling, and validation results.
 - **PR #460 change record** - Added a [detailed changelog](docs/pr460-changelog.md) for the reliability, efficiency, security and responsive UI changes proposed against `dev`.

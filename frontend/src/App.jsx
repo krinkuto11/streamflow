@@ -29,6 +29,7 @@ const AutomationProfileEditor = lazy(() => import('@/pages/AutomationProfileEdit
 const Scheduling = lazy(() => import('@/pages/Scheduling'))
 const StatsDashboard = lazy(() => import('@/pages/StatsDashboard'))
 const OperatorHelp = lazy(() => import('@/pages/OperatorHelp'))
+const Backups = lazy(() => import('@/pages/Backups'))
 
 function PageLoading() {
   return (
@@ -158,7 +159,7 @@ function App() {
     )
   }
 
-  if (!setupComplete && setupStatus) {
+  if (!setupComplete && setupStatus && location.pathname !== '/backups') {
     return (
       <Suspense fallback={<PageLoading />}>
         <SetupWizard onComplete={handleSetupComplete} setupStatus={setupStatus} />
@@ -198,7 +199,7 @@ function App() {
         isCollapsed ? "lg:ml-20" : "lg:ml-56"
       )}>
         <div className="mx-auto max-w-[1600px] min-w-0">
-          {startupGateActive ? (
+          {startupGateActive && location.pathname !== '/backups' ? (
             <StreamFlowInitializingScreen
               initialization={udiInitialization || {
                 percentage: 0,
@@ -217,6 +218,7 @@ function App() {
                   <Route path="/teamarr-preflight" element={<TeamarrPreflight />} />
                   <Route path="/channels" element={<ChannelConfiguration />} />
                   <Route path="/settings" element={<AutomationSettings />} />
+                  <Route path="/backups" element={<Backups />} />
                   <Route path="/automation/profiles/:profileId" element={<AutomationProfileEditor />} />
                   <Route path="/scheduling" element={<Scheduling />} />
                   <Route path="/stats" element={<StatsDashboard />} />
