@@ -40,6 +40,7 @@ from apps.background.scheduling_workers import (
     scheduled_event_processor_loop,
     udi_refresh_processor_loop,
 )
+from apps.background.setup_startup import serialized_processor_start, start_setup_processors
 from apps.stream.udp_proxy import UDPProxyManager
 from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.config.openstream_config import get_openstream_config
@@ -520,6 +521,7 @@ def scheduled_event_processor():
     )
 
 
+@serialized_processor_start
 def start_scheduled_event_processor():
     """Start the background thread for processing scheduled events."""
     global scheduled_event_processor_thread, scheduled_event_processor_running, scheduled_event_processor_wake
@@ -587,6 +589,7 @@ def epg_refresh_processor():
     )
 
 
+@serialized_processor_start
 def start_epg_refresh_processor():
     """Start the background thread for periodic EPG refresh."""
     global epg_refresh_thread, epg_refresh_running, epg_refresh_wake
@@ -651,6 +654,7 @@ def udi_refresh_processor():
     )
 
 
+@serialized_processor_start
 def start_udi_refresh_processor():
     """Start the background thread for scheduled UDI cache refreshes."""
     global udi_refresh_thread, udi_refresh_running, udi_refresh_wake
@@ -693,6 +697,16 @@ def stop_udi_refresh_processor():
 
     logger.info("UDI refresh processor stopped")
     return True
+
+
+def start_setup_background_processors():
+    """Wire required setup workers; their lifecycle stays in the background module."""
+    start_setup_processors(
+        is_configured=check_wizard_complete,
+        start_scheduled_events=start_scheduled_event_processor,
+        start_epg_refresh=start_epg_refresh_processor,
+        start_udi_refresh=start_udi_refresh_processor,
+    )
 
 
 @app.route('/', methods=['GET'])
@@ -1338,6 +1352,7 @@ def get_setup_wizard_status():
         get_automation_config_manager=get_automation_config_manager,
         get_dispatcharr_config=get_dispatcharr_config,
         get_udi_manager=get_udi_manager,
+        on_initialized=start_setup_background_processors,
     )
 
 @app.route('/api/test-match-live', methods=['POST'])
@@ -1407,6 +1422,7 @@ def update_dispatcharr_config_endpoint():
         payload=request.get_json(silent=True),
         get_dispatcharr_config=get_dispatcharr_config,
         get_udi_manager=get_udi_manager,
+        on_initialized=start_setup_background_processors,
     )
 
 @app.route('/api/dispatcharr/test-connection', methods=['POST'])

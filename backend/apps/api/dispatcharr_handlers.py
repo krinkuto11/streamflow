@@ -8,6 +8,7 @@ import requests
 from flask import jsonify
 
 from apps.core.logging_config import setup_logging
+from apps.background.setup_startup import initialize_setup_data
 
 logger = setup_logging(__name__)
 
@@ -28,6 +29,7 @@ def update_dispatcharr_config_response(
     payload: Optional[Dict[str, Any]],
     get_dispatcharr_config: Callable[[], Any],
     get_udi_manager: Callable[[], Any],
+    on_initialized: Optional[Callable[[], Any]] = None,
 ):
     """Update Dispatcharr configuration and trigger UDI refresh when configured."""
     try:
@@ -78,7 +80,11 @@ def update_dispatcharr_config_response(
             try:
                 logger.info("Dispatcharr credentials updated, triggering background UDI Manager initialize...")
                 udi = get_udi_manager()
-                threading.Thread(target=udi.initialize, kwargs={"force_refresh": True}, daemon=True).start()
+                threading.Thread(
+                    target=initialize_setup_data,
+                    kwargs={"udi": udi, "force_refresh": True, "on_initialized": on_initialized},
+                    daemon=True,
+                ).start()
                 logger.info("UDI Manager initialization started in background")
             except Exception as exc:
                 logger.warning(
