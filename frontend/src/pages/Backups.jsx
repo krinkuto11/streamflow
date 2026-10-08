@@ -122,7 +122,7 @@ export default function Backups() {
     {notice && <Alert role="status"><AlertDescription>{notice}</AlertDescription></Alert>}
     {restarting && <Alert role="status"><AlertDescription>Restoring and restarting StreamFlow. This page will reconnect automatically. If it cannot reconnect, check the container log before restarting it.</AlertDescription></Alert>}
     {!status || !config ? <p role="status">Loading backups…</p> : <>
-      {status.restore_review?.pending && <RestoreReview review={status.restore_review} disabled={disabled} run={run} onRestart={restartFromReview} />}
+      {status.restore_review?.pending && <RestoreReview review={status.restore_review} disabled={disabled} run={run} onRestart={restartFromReview} error={error} />}
       <Card>
         <CardHeader><CardTitle>Create or upload</CardTitle><CardDescription>Includes settings, profiles, regex rules and stored connection credentials. Keep backup files private. Credentials supplied through container variables or secret files stay in your container configuration.</CardDescription></CardHeader>
         <CardContent className="space-y-4">

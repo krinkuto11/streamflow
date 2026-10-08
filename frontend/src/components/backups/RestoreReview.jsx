@@ -47,7 +47,7 @@ function Assignments({ kind, rows, targets, selected, onChange, disabled }) {
   </details>
 }
 
-export default function RestoreReview({ review, disabled, run, onRestart }) {
+export default function RestoreReview({ review, disabled, run, onRestart, error }) {
   const [connection, setConnection] = useState(null)
   const [selected, setSelected] = useState({})
   const [preview, setPreview] = useState(null)
@@ -86,6 +86,7 @@ export default function RestoreReview({ review, disabled, run, onRestart }) {
       </>}
       <Dialog open={Boolean(preview)} onOpenChange={open => { if (!open && !disabled) setPreview(null) }}><DialogContent>
         <DialogHeader><DialogTitle>Confirm restored assignments?</DialogTitle><DialogDescription>StreamFlow verifies the live inventory again, creates a safety backup, applies these assignments and restarts. Saved automatic services may resume afterwards.</DialogDescription></DialogHeader>
+        {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
         {preview && <div className="space-y-3 text-sm">
           <p>Skipped assignments: {preview.skipped_assignments}</p>
           {Object.entries(preview.history).map(([key, value]) => <p key={key}>{key === 'stream_telemetry' ? 'Quality measurements' : 'Playback observations'}: {value.kept} kept · {value.removed} removed because identity is unverified.</p>)}
