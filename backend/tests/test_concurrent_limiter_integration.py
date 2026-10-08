@@ -733,7 +733,8 @@ def test_viewer_preemption_clears_released_profile_before_sibling_retry():
         assert credential_fragment not in serialized_progress
 
 
-def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit():
+@pytest.mark.parametrize('leading_pending_heartbeat', [False, True])
+def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit(leading_pending_heartbeat):
     import apps.stream.concurrent_stream_limiter as limiter_module
     import apps.stream.stream_checker_service as service_module
     from apps.stream.concurrent_stream_limiter import get_account_limiter
@@ -783,10 +784,12 @@ def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit()
     transition_blocked = threading.Event()
     release_transition = threading.Event()
     heartbeat_seen = threading.Event()
+    pending_heartbeat_seen = threading.Event()
     reserve_boundary_open = threading.Event()
     release_boundary_open = threading.Event()
     heartbeat_attempted_during_reserve = threading.Event()
     heartbeat_attempted_during_release = threading.Event()
+    heartbeat_release_gate_reached = threading.Event()
     heartbeat_boundary_locks = {'reserve': None, 'release': None}
     original_reserved_profile = limiter_module.ReservedProfile
     original_rlock = threading.RLock
@@ -829,7 +832,22 @@ def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit()
                 self.depth -= 1
                 if self.depth == 0:
                     self.owner_thread_id = None
-            return self._lock.release()
+                outermost = self.depth == 0
+            result = self._lock.release()
+            if (
+                outermost
+                and threading.current_thread().name == 'stream-checker-heartbeat'
+                and self is heartbeat_boundary_locks['reserve']
+                and heartbeat_seen.is_set()
+                and not heartbeat_release_gate_reached.is_set()
+            ):
+                # The checking snapshot is fully published and its lock is
+                # released. Park here until the worker opens the release
+                # boundary, so our next acquisition observes that boundary
+                # instead of already blocking before it opens.
+                heartbeat_release_gate_reached.set()
+                assert release_boundary_open.wait(timeout=2)
+            return result
 
         def held_by_current_thread(self):
             with self._owner_lock:
@@ -867,7 +885,15 @@ def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit()
 
     def record_progress(**kwargs):
         progress_updates.append(deepcopy(kwargs))
-        if kwargs.get('step_detail') == 'Checking streams...':
+        if (
+            kwargs.get('step_detail') == 'Checking streams...'
+            and (kwargs.get('streams_detail') or [{}])[0].get('status') == 'pending'
+        ):
+            pending_heartbeat_seen.set()
+        if (
+            kwargs.get('step_detail') == 'Checking streams...'
+            and (kwargs.get('streams_detail') or [{}])[0].get('status') == 'checking'
+        ):
             heartbeat_seen.set()
 
     def analyze_after_heartbeat(**kwargs):
@@ -900,6 +926,13 @@ def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit()
     )
     release_thread.start()
 
+    original_check_streams = limiter_module.SmartStreamScheduler.check_streams_with_limits
+
+    def check_after_optional_pending_heartbeat(scheduler, *args, **kwargs):
+        if leading_pending_heartbeat:
+            assert pending_heartbeat_seen.wait(timeout=2)
+        return original_check_streams(scheduler, *args, **kwargs)
+
     with (
         patch('apps.stream.stream_checker_service.get_udi_manager', return_value=udi),
         patch(
@@ -925,6 +958,11 @@ def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit()
         ),
         patch.object(limiter_module, 'ReservedProfile', BlockingReservedProfile),
         patch.object(service_module.threading, 'RLock', ObservableRLock),
+        patch.object(
+            limiter_module.SmartStreamScheduler,
+            'check_streams_with_limits',
+            check_after_optional_pending_heartbeat,
+        ),
         patch.object(
             service_module,
             '_STREAM_STATUS_HEARTBEAT_INTERVAL_SECONDS',
@@ -995,12 +1033,16 @@ def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit()
     assert heartbeat_seen.is_set()
     assert heartbeat_attempted_during_reserve.is_set()
     assert heartbeat_attempted_during_release.is_set()
+    assert heartbeat_release_gate_reached.is_set()
+    if leading_pending_heartbeat:
+        assert pending_heartbeat_seen.is_set()
     assert heartbeat_boundary_locks['reserve'] is heartbeat_boundary_locks['release']
 
     heartbeat_updates = [
         update
         for update in progress_updates
         if update.get('step_detail') == 'Checking streams...'
+        and (update.get('streams_detail') or [{}])[0].get('status') == 'checking'
     ]
     assert heartbeat_updates
     reserved_fields = {
