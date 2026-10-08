@@ -14,6 +14,7 @@ describe('navigation location labels', () => {
     ['/stats', 'Analytics'],
     ['/changelog', 'Changelog'],
     ['/settings', 'Settings'],
+    ['/backups', 'Backups'],
     ['/automation/profiles/example', 'Settings'],
     ['/help', 'Help'],
     ['/help/scheduling', 'Help'],

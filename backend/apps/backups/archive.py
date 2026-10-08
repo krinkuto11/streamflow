@@ -12,6 +12,7 @@ import stat
 import tempfile
 import uuid
 import zipfile
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -57,7 +58,7 @@ def config_files(config_dir):
 
 
 def database_summary(path):
-    with sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True) as db:
+    with closing(sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
         if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
             raise ValueError('The backup database failed its integrity check')
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -71,6 +72,18 @@ def database_summary(path):
         from apps.database.migrations import MIGRATIONS
         if version > max(m.version for m in MIGRATIONS):
             raise ValueError('The backup needs a newer StreamFlow database version')
+        from apps.database.models import Base
+        for name, table in Base.metadata.tables.items():
+            if name not in tables:
+                raise ValueError('Incomplete StreamFlow database schema')
+            columns = {row[1] for row in db.execute(f'PRAGMA table_info("{name}")')}
+            expected = set(table.columns.keys())
+            if version < 1 and name == 'runs':
+                expected -= {'job_category', 'job_outcome', 'job_subject_ref', 'job_correlation_id'}
+            if version < 2 and name == 'monitoring_sessions':
+                expected.discard('session_type')
+            if not expected <= columns:
+                raise ValueError('Incompatible StreamFlow database columns')
         counts = {label: db.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
                   for label, table in SUMMARY_TABLES.items() if table in tables}
     return version, counts
@@ -79,8 +92,8 @@ def database_summary(path):
 def snapshot_database(source, target, *, include_history=True):
     if not source.is_file() or source.is_symlink():
         raise ValueError('The StreamFlow database is unavailable')
-    with sqlite3.connect(source.as_uri() + '?mode=ro', uri=True, timeout=30) as src:
-        with sqlite3.connect(target) as dst:
+    with closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True, timeout=30)) as src:
+        with closing(sqlite3.connect(target)) as dst:
             src.backup(dst, pages=256, sleep=0.01)
             if not include_history:
                 tables = {r[0] for r in dst.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -114,13 +127,21 @@ def create_archive(config_dir, backup_dir, *, include_history=True, monitoring_h
         with tempfile.TemporaryDirectory(prefix='.snapshot-', dir=backup_dir) as tmp:
             stage = Path(tmp)
             for attempt in range(3):
-                originals = {p.name: p.read_bytes() for p in config_files(config_dir)}
+                paths = config_files(config_dir)
+                if len(paths) > 126 or sum(p.stat().st_size for p in paths) > 128 * 1024 ** 2:
+                    raise ValueError('Configuration exceeds the backup size limit')
+                if any(p.stat().st_size > MAX_JSON_BYTES for p in paths):
+                    raise ValueError('A configuration file exceeds the backup size limit')
+                originals = {p.name: p.read_bytes() for p in paths}
                 for content in originals.values():
                     if len(content) > MAX_JSON_BYTES:
                         raise ValueError('A configuration file exceeds the backup size limit')
                     json.loads(content, parse_constant=_invalid_constant)
                 snapshot_database(config_dir / 'streamflow.db', stage / 'streamflow.db', include_history=include_history)
-                if originals == {p.name: p.read_bytes() for p in config_files(config_dir)}:
+                final_paths = config_files(config_dir)
+                if len(final_paths) > 126 or any(p.stat().st_size > MAX_JSON_BYTES for p in final_paths) or sum(p.stat().st_size for p in final_paths) > 128 * 1024 ** 2:
+                    raise ValueError('Configuration exceeds the backup size limit')
+                if originals == {p.name: p.read_bytes() for p in final_paths}:
                     break
             else:
                 raise ValueError('Configuration changed during backup; try again')
@@ -129,7 +150,11 @@ def create_archive(config_dir, backup_dir, *, include_history=True, monitoring_h
                 path.parent.mkdir(exist_ok=True)
                 path.write_bytes(content)
             if include_history and monitoring_history is not None:
+                from apps.backups.history import validate_history
+                validate_history(monitoring_history)
                 (stage / 'monitoring-history.json').write_text(json.dumps(monitoring_history, allow_nan=False), encoding='utf-8')
+                if (stage / 'monitoring-history.json').stat().st_size > MAX_JSON_BYTES:
+                    raise ValueError('Monitoring history exceeds the backup size limit')
             schema, counts = database_summary(stage / 'streamflow.db')
             files = {p.relative_to(stage).as_posix(): {'size': p.stat().st_size, 'sha256': digest(p)}
                      for p in sorted(stage.rglob('*')) if p.is_file()}
@@ -145,7 +170,7 @@ def create_archive(config_dir, backup_dir, *, include_history=True, monitoring_h
             if temporary.stat().st_size > MAX_ARCHIVE_BYTES:
                 raise ValueError('Archive exceeds the backup size limit')
             os.chmod(temporary, 0o600)
-            with temporary.open('rb') as handle:
+            with temporary.open('r+b') as handle:
                 os.fsync(handle.fileno())
             os.replace(temporary, final)
         return {'name': name, 'size': final.stat().st_size, **manifest}
@@ -161,6 +186,8 @@ def manifest_metadata(path):
         data = json.loads(archive.read(info), parse_constant=_invalid_constant)
     if not isinstance(data, dict) or data.get('application') != 'StreamFlow' or data.get('format_version') != FORMAT_VERSION:
         raise ValueError('Unsupported backup format')
+    if type(data.get('include_history')) is not bool or type(data.get('schema_version')) is not int:
+        raise ValueError('Invalid backup metadata')
     return data
 
 
@@ -199,7 +226,10 @@ def extract_validated(path, destination):
             if digest(target) != expected.get('sha256'):
                 raise ValueError('Backup checksum check failed')
             if relative.endswith('.json'):
-                read_json(target)
+                content = read_json(target)
+                if relative == 'monitoring-history.json':
+                    from apps.backups.history import validate_history
+                    validate_history(content)
         schema, _ = database_summary(destination / 'streamflow.db')
         if schema != metadata.get('schema_version'):
             raise ValueError('Backup schema check failed')

@@ -6,9 +6,12 @@ The journal makes an interrupted multi-file restore recoverable on the next boot
 from __future__ import annotations
 
 import logging
+import json
 import os
 import shutil
+import sqlite3
 import tempfile
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,7 +41,7 @@ def _replace(source, target):
     try:
         shutil.copyfile(source, temporary)
         os.chmod(temporary, 0o600)
-        with open(temporary, 'rb') as handle:
+        with open(temporary, 'r+b') as handle:
             os.fsync(handle.fileno())
         os.replace(temporary, target)
     finally:
@@ -109,7 +112,9 @@ def apply_pending_restore(config_dir, backup_dir=None):
                     raise ValueError('Staged backup checksum check failed')
             database_summary(incoming / 'streamflow.db')
             backup_dir = Path(backup_dir or os.environ.get('BACKUP_DIR', str(root / 'backups'))).resolve()
-            safety = create_archive(root, backup_dir, kind='safety', monitoring_history=None)
+            history_path = root / 'monitoring_history.json'
+            safety = create_archive(root, backup_dir, kind='safety',
+                                    monitoring_history=read_json(history_path) if history_path.is_file() else None)
             result['safety_backup'] = safety['name']
             safety_files = sorted(backup_dir.glob('streamflow-safety-*.zip'), reverse=True)
             for obsolete in safety_files[3:]:
@@ -122,13 +127,26 @@ def apply_pending_restore(config_dir, backup_dir=None):
             for path in [root / 'monitoring_history.json', *root.glob('*.json.last-good')]:
                 if path.is_file() and not path.is_symlink():
                     originals[path.name] = path
-            new_files = {'streamflow.db': incoming / 'streamflow.db'}
+            # The backup can be created during live monitoring. Restore its data,
+            # but never resume historical process IDs or active-session flags.
+            restored_db = stage / 'restored.db'
+            snapshot_database(incoming / 'streamflow.db', restored_db)
+            with closing(sqlite3.connect(restored_db)) as db:
+                for identity, raw in db.execute('SELECT session_id, raw_info FROM monitoring_sessions').fetchall():
+                    content = json.loads(raw) if raw else {}
+                    content['is_active'] = False
+                    db.execute('UPDATE monitoring_sessions SET pid=NULL, raw_info=? WHERE session_id=?', (json.dumps(content), identity))
+                db.execute("UPDATE monitoring_sessions SET status='stopped' WHERE stream_id IS NULL")
+                db.commit()
+            new_files = {'streamflow.db': restored_db}
             for path in (incoming / 'config').glob('*.json'):
                 new_files[path.name] = path
                 new_files[path.name + '.last-good'] = path
             if (incoming / 'monitoring-history.json').exists():
                 new_files['monitoring_history.json'] = incoming / 'monitoring-history.json'
             targets = sorted({'streamflow.db', 'monitoring_history.json', *originals, *new_files})
+            for name in targets:
+                _safe_file(root, name)
             for name, source in originals.items():
                 _replace(source, rollback / name)
             snapshot_database(root / 'streamflow.db', rollback / 'streamflow.db')

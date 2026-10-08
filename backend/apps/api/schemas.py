@@ -5,6 +5,31 @@ from typing import Any, Dict, List, Optional
 from apps.core.exceptions import ValidationError
 
 
+@dataclass
+class BackupCreateRequest:
+    include_history: Optional[bool] = None
+
+    @classmethod
+    def from_payload(cls, payload):
+        if not isinstance(payload, dict) or set(payload) - {'include_history'}:
+            raise ValidationError('Invalid backup request')
+        value = payload.get('include_history')
+        if 'include_history' in payload and type(value) is not bool:
+            raise ValidationError('include_history must be a boolean')
+        return cls(include_history=value)
+
+
+@dataclass
+class BackupRestoreRequest:
+    confirm: bool
+
+    @classmethod
+    def from_payload(cls, payload):
+        if not isinstance(payload, dict) or set(payload) != {'confirm'} or payload['confirm'] is not True:
+            raise ValidationError('Explicit confirmation is required')
+        return cls(confirm=True)
+
+
 def _ensure_dict(payload: Any, *, message: str) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValidationError(message)
