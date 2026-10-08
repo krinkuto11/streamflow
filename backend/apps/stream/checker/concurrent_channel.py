@@ -197,6 +197,7 @@ class CheckerConcurrentChannelMixin:
         except Exception as e:
             logger.warning(f"Failed to load profile settings for channel {channel_id}: {e}")
             _threshold_config = {}
+        scoring_weights = self._prepare_playback_scoring(scoring_weights, channel_id)
         profile_progress_context = self._automation_profile_progress_context(
             profile,
             forced_profile_id=forced_profile_id,

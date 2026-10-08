@@ -332,6 +332,22 @@ class Run(Base):
     stream_telemetries = relationship("StreamTelemetry", back_populates="run", cascade="all, delete-orphan")
 
 
+class PlaybackObservation(Base):
+    """Checkpoints of passive playback legs; no viewer identity or source URLs."""
+    __tablename__ = 'playback_observations'
+
+    id = Column(String(32), primary_key=True)
+    channel_id = Column(Integer, nullable=False, index=True)
+    stream_id = Column(Integer, nullable=False, index=True)
+    source_fingerprint = Column(String(64), nullable=False)
+    last_seen = Column(Float, nullable=False, index=True)
+    observed_seconds = Column(Float, nullable=False, default=0)
+    stalled_seconds = Column(Float, nullable=False, default=0)
+    samples = Column(Integer, nullable=False, default=0)
+    stalls = Column(Integer, nullable=False, default=0)
+    failovers = Column(Integer, nullable=False, default=0)
+
+
 class ChannelHealth(Base):
     __tablename__ = 'channel_health'
     

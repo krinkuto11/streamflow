@@ -384,6 +384,12 @@ export const groupSettingsAPI = {
   bulkDisableChecking: () => api.post('/group-settings/bulk-disable-checking'),
 };
 
+export const playbackStabilityAPI = {
+  getConfig: (options) => api.get('/playback-stability/config', options),
+  updateConfig: (config) => api.put('/playback-stability/config', config),
+  getStatus: (options) => api.get('/playback-stability/status', options),
+};
+
 export const profileAPI = {
   getConfig: (options) => api.get('/profile-config', options),
   getProfileChannels: (profileId, includeSnapshot = false) =>

@@ -11,7 +11,8 @@ import { Badge } from '@/components/ui/badge.jsx'
 import { Separator } from '@/components/ui/separator.jsx'
 import { Checkbox } from '@/components/ui/checkbox.jsx'
 import { Loader2, ArrowLeft, Save, AlertCircle, ArrowUp, ArrowDown, Check, GripVertical } from 'lucide-react'
-import { automationAPI, m3uAPI } from '@/services/api.js'
+import { automationAPI, m3uAPI, playbackStabilityAPI } from '@/services/api.js'
+import { PlaybackStabilityScoring } from '@/components/PlaybackStability.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { cn } from '@/lib/utils'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
@@ -50,7 +51,9 @@ const DEFAULT_PROFILE = {
         fps: 0.15,
         codec: 0.10,
         prefer_h265: true,
-        loop_penalty: 0
+        loop_penalty: 0,
+        use_playback_stability: false,
+        playback_stability_weight: 0.15
     },
     channel_visibility_automation: {
         enabled: false,
@@ -77,6 +80,18 @@ export default function AutomationProfileEditor() {
     const [profile, setProfile] = useState(null)
     const [m3uAccounts, setM3uAccounts] = useState([])
     const [activeStep, setActiveStep] = useState('m3u_update')
+    const [playbackRecording, setPlaybackRecording] = useState(false)
+    const [playbackSettingsError, setPlaybackSettingsError] = useState(false)
+
+    useEffect(() => {
+        const controller = new AbortController()
+        playbackStabilityAPI.getConfig({ signal: controller.signal }).then(({ data }) => {
+            if (!controller.signal.aborted) setPlaybackRecording(data.enabled === true)
+        }).catch(() => {
+            if (!controller.signal.aborted) setPlaybackSettingsError(true)
+        })
+        return () => controller.abort()
+    }, [])
 
     useEffect(() => {
         loadData()
@@ -306,6 +321,8 @@ export default function AutomationProfileEditor() {
                         return (
                             <div key={step.id} className="flex flex-col items-center">
                                 <button
+                                    aria-label={`Configure ${step.label}`}
+                                    aria-pressed={active}
                                     onClick={() => setActiveStep(step.id)}
                                     className={cn(
                                         "w-10 h-10 rounded-full border-4 flex items-center justify-center transition-all duration-300",
@@ -744,6 +761,9 @@ export default function AutomationProfileEditor() {
                                                 <p className="text-[10px] text-muted-foreground">Score penalty for looping streams (0 = disabled, min -0.25)</p>
                                             </div>
                                         </div>
+                                        <PlaybackStabilityScoring weights={profile.scoring_weights}
+                                            recordingEnabled={playbackRecording} loadError={playbackSettingsError}
+                                            onChange={(key, value) => updateProfile(`scoring_weights.${key}`, value)} />
                                         <div className="flex items-center space-x-3 bg-muted/50 p-3 rounded-md">
                                             <Switch
                                                 id="prefer_h265"

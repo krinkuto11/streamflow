@@ -30,6 +30,10 @@ from apps.core.api_utils import _get_base_url
 from apps.stream.stream_checker_service import get_stream_checker_service
 from apps.stream.shadow_blank_monitor_service import get_shadow_blank_monitor_service
 from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
+from apps.stream.playback_stability_service import get_playback_stability_service
+from apps.api.playback_stability_handlers import (
+    playback_stability_config_response, playback_stability_status_response,
+)
 from apps.automation.scheduling_service import get_scheduling_service
 from apps.background.scheduling_workers import (
     epg_refresh_processor_loop,
@@ -2585,6 +2589,18 @@ def create_session_from_event(event_id):
 
 # ==================== Settings API ====================
 
+@app.route('/api/playback-stability/config', methods=['GET', 'PUT'])
+def playback_stability_config():
+    return playback_stability_config_response(
+        method=request.method, payload=request.get_json(silent=True),
+        get_service=get_playback_stability_service,
+    )
+
+
+@app.route('/api/playback-stability/status', methods=['GET'])
+def playback_stability_status():
+    return playback_stability_status_response(get_service=get_playback_stability_service)
+
 @app.route('/api/settings/session', methods=['GET', 'POST'])
 def handle_session_settings():
     """Get or update session settings (like review duration)."""
@@ -2704,6 +2720,10 @@ if __name__ == '__main__':
                 except Exception:
                     pass
                     
+                try:
+                    get_playback_stability_service().stop()
+                except Exception:
+                    logger.exception('Failed to stop Playback Stability recorder')
                 logger.info("Graceful shutdown complete. Exiting.")
                 sys.exit(0)
 
@@ -2767,6 +2787,12 @@ if __name__ == '__main__':
             logger.info("Stream monitoring service auto-started")
         except Exception as e:
             logger.error(f"Failed to auto-start stream monitoring service: {e}")
+
+        try:
+            if check_wizard_complete():
+                get_playback_stability_service().start()
+        except Exception:
+            logger.exception('Failed to start Playback Stability recorder')
 
         try:
             if not check_wizard_complete():

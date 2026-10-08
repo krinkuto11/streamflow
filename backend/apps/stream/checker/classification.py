@@ -347,6 +347,20 @@ class CheckerClassificationMixin:
         return 0
 
 
+    def _prepare_playback_scoring(self, scoring_weights: Optional[Dict], channel_id: int) -> Optional[Dict]:
+        """Resolve one immutable history snapshot per channel, never per probe."""
+        if not scoring_weights or scoring_weights.get('use_playback_stability') is not True:
+            return scoring_weights
+        prepared = dict(scoring_weights)
+        # Never accept an injected internal snapshot from a saved profile.
+        prepared['_playback_stability'] = {}
+        try:
+            from apps.stream.playback_stability_service import get_playback_stability_service
+            prepared['_playback_stability'] = get_playback_stability_service().scoring_snapshot(channel_id)
+        except Exception:
+            logger.warning('Playback Stability evidence unavailable; using unchanged quality scoring')
+        return prepared
+
     def _calculate_stream_score(self, stream_data: Dict, priority_m3u_ids: List[int] = None, priority_mode: str = 'absolute', scoring_weights: Dict = None) -> float:
         """Calculate a quality score for a stream based on analysis.
 
@@ -359,6 +373,7 @@ class CheckerClassificationMixin:
             scoring_weights: Optional per-profile scoring weights. Falls back to global config if not provided.
         """
         # Dead streams always get a score of 0
+        stream_data.pop('playback_stability_score', None)
         _dead, _ = self._is_stream_dead(stream_data)
         if _dead:
             return 0.0
@@ -432,7 +447,21 @@ class CheckerClassificationMixin:
         hdr_score = 1.0 if hdr_format in ['HDR10', 'HLG'] else 0.0
         score += hdr_score * weights.get('hdr', 0.10)
 
-        return round(score, 2)
+        return round(self._apply_playback_stability_score(score, stream_data, scoring_weights), 2)
+
+    @staticmethod
+    def _apply_playback_stability_score(score: float, stream_data: Dict, scoring_weights: Optional[Dict]) -> float:
+        # This is a bounded deduction from the existing score, not a new weight
+        # in its denominator. Missing evidence leaves the score exactly intact.
+        if scoring_weights and scoring_weights.get('use_playback_stability') is True:
+            stability = scoring_weights.get('_playback_stability', {}).get(stream_data.get('stream_id'))
+            weight = scoring_weights.get('playback_stability_weight', 0.15)
+            if (isinstance(stability, (int, float)) and not isinstance(stability, bool)
+                    and 0 <= stability <= 1 and isinstance(weight, (int, float))
+                    and not isinstance(weight, bool) and 0 <= weight <= 1):
+                score *= 1 - weight * (1 - stability)
+                stream_data['playback_stability_score'] = round(stability * 100, 1)
+        return score
 
 
     def _get_priority_boost(self, stream_id: int, stream_data: Dict, priority_m3u_ids: List[int] = None, priority_mode: str = 'absolute') -> float:

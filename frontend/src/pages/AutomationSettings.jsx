@@ -12,6 +12,7 @@ import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, dispatcharrAPI, openstreamAPI, sessionSettingsAPI, schedulingAPI } from '@/services/api.js'
 import AutomationProfileStudio from '@/components/Automation/AutomationProfileStudio.jsx'
 import AutomationPeriods from '@/components/Automation/AutomationPeriods.jsx'
+import PlaybackStabilitySettings from '@/components/PlaybackStability.jsx'
 import { saveSettingsSection, SETTINGS_SAVE_DEPENDENCIES } from '@/lib/settings-save.js'
 
 const DEFAULT_UDI_REFRESH_INTERVAL_MINUTES = 240
@@ -517,6 +518,7 @@ export default function AutomationSettings() {
         </TabsContent>
 
         <TabsContent value="monitoring" className="space-y-6">
+          <PlaybackStabilitySettings />
           <Card>
             <CardHeader>
               <CardTitle>Monitoring Settings</CardTitle>
