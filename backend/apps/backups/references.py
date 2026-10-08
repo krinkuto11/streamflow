@@ -19,6 +19,12 @@ RUNTIME_KEYS = {'automation_state', 'last_run', 'last_automation_run', 'teamarr_
                 'teamarr_preflight_checked_state', 'shadow_blank_monitor_safety_state'}
 
 
+def decoded(raw):
+    # SQLite JSON columns have NUMERIC affinity: scalar JSON numbers/null can
+    # arrive as Python numbers/None instead of JSON text.
+    return json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
+
+
 def visit(value, key, callback, depth=0):
     if depth > 60:
         raise ValueError('Configuration nesting exceeds the remapping limit')
@@ -69,12 +75,12 @@ def configuration_records(db, root):
     for key, raw in db.execute('SELECT key,value FROM system_settings'):
         if key in RUNTIME_KEYS or key.startswith('backup_') or key == 'dispatcharr_config':
             continue
-        yield ('setting', key, json.loads(raw))
+        yield ('setting', key, decoded(raw))
     for table in ('automation_profiles', 'automation_periods'):
         for identity, raw in db.execute(f'SELECT id,extra_settings FROM {table}'):
-            yield (table, identity, json.loads(raw) if raw else {})
+            yield (table, identity, decoded(raw) if raw else {})
     for identity, raw in db.execute('SELECT id,variables FROM match_profile_steps'):
-        yield ('match_profile_steps', identity, json.loads(raw) if raw else {})
+        yield ('match_profile_steps', identity, decoded(raw) if raw else {})
     for path in config_files(root):
         if path.stem not in RUNTIME_KEYS:
             yield ('file', path.name, read_json(path))

@@ -319,3 +319,14 @@ def test_legacy_string_provider_identifiers_preserve_regex_restrictions(persiste
     apply_mappings(persistent,inventory,inventory,plan())
     with closing(sqlite3.connect(persistent/'streamflow.db')) as db:
         assert json.loads(db.execute('SELECT m3u_accounts FROM channel_regex_patterns').fetchone()[0])==[5,9]
+
+
+@pytest.mark.parametrize('value', [0, 2, 1.5, None])
+def test_sqlite_json_scalars_do_not_block_inventory_review(persistent,inventory,value):
+    with closing(sqlite3.connect(persistent/'streamflow.db')) as db:
+        db.execute('INSERT INTO system_settings VALUES (?,?)', ('sample_scalar',value));db.commit()
+    assert build_report(persistent,inventory,inventory,'a'*64)['entities']['channels']
+    preview_mappings(persistent,inventory,inventory,plan())
+    apply_mappings(persistent,inventory,inventory,plan())
+    with closing(sqlite3.connect(persistent/'streamflow.db')) as db:
+        assert db.execute("SELECT value FROM system_settings WHERE key='sample_scalar'").fetchone()[0] == ('null' if value is None else value)
