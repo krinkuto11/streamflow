@@ -251,3 +251,49 @@ def test_incomplete_dispatcharr_fetch_fails_closed(monkeypatch, response):
     monkeypatch.setattr(UDIFetcher, '__init__', lambda self:setattr(self, 'base_url', 'https://example.invalid'))
     monkeypatch.setattr(UDIFetcher, '_fetch_url', lambda self,url:response if '/channels/channels/' in url else [])
     with pytest.raises(ValueError): fetch_inventory()
+
+
+def test_identical_cache_duplicates_are_collapsed_but_conflicts_rejected():
+    arguments = {'providers':[], 'channels':[], 'groups':[], 'channel_profiles':[],
+                 'streams':[{'id':1,'url':'https://example.invalid/one','m3u_account':5}]*2}
+    assert len(normalize_inventory(**arguments)['streams']) == 1
+    arguments['streams'] = [arguments['streams'][0], {'id':1,'url':'https://example.invalid/other','m3u_account':5}]
+    with pytest.raises(ValueError, match='conflicting'): normalize_inventory(**arguments)
+
+
+def test_conflicting_or_uninitialized_cache_does_not_stop_backups(monkeypatch):
+    from apps.udi import manager
+    from apps.backups.inventory import capture_inventory
+    from types import SimpleNamespace
+    import threading
+    udi=SimpleNamespace(_lock=threading.RLock(),_initialized=False)
+    monkeypatch.setattr(manager,'get_udi_manager',lambda:udi)
+    assert capture_inventory() is None
+    udi._initialized=True
+    udi._m3u_accounts_cache=[]; udi._channels_cache=[]; udi._channel_profiles_cache=[]; udi._channel_groups_cache=[]
+    udi._streams_cache=[{'id':1,'url':'https://example.invalid/one'}, {'id':1,'url':'https://example.invalid/other'}]
+    assert capture_inventory() is None
+
+
+def test_complete_fetch_checks_unique_ids_and_requests_stable_order(monkeypatch):
+    from apps.udi.fetcher import UDIFetcher
+    from apps.config import dispatcharr_config
+    from apps.backups.inventory import fetch_inventory
+    from types import SimpleNamespace
+    config = SimpleNamespace(is_configured=lambda:True, get_stream_fetch_page_size=lambda:1000,get_stream_fetch_max_workers=lambda:2)
+    monkeypatch.setattr(dispatcharr_config,'get_dispatcharr_config',lambda:config)
+    monkeypatch.setattr('apps.udi.fetcher.get_dispatcharr_config',lambda:config)
+    monkeypatch.setattr(UDIFetcher,'__init__',lambda self:setattr(self,'base_url','https://example.invalid'))
+    requested=[]
+    def fetch(self,url):
+        requested.append(url)
+        if '/streams/ids/' in url:return [2]
+        if '/channels/ids/' in url:return [1]
+        if '/channels/channels/' in url:return {'count':1,'results':[{'id':1,'uuid':'sample'}]}
+        if '/channels/streams/' in url:return {'count':2,'results':[{'id':2,'url':'https://example.invalid'}]*2}
+        return []
+    monkeypatch.setattr(UDIFetcher,'_fetch_url',fetch)
+    assert len(fetch_inventory()['streams'])==1
+    assert all('ordering=id' in url for url in requested if 'page=' in url)
+    monkeypatch.setattr(UDIFetcher,'fetch_all_ids',lambda self:{'channels':{1},'streams':{2,3}})
+    with pytest.raises(ValueError,match='incomplete'):fetch_inventory()

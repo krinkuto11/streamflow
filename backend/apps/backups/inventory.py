@@ -28,6 +28,7 @@ def normalize_inventory(*, providers, channels, groups, channel_profiles, stream
     result = {'format_version': 1}
     for kind, rows in zip(KINDS, (providers, channels, groups, channel_profiles, streams)):
         result[kind] = []
+        seen = {}
         for row in rows:
             identity = identifier(row.get('id'))
             if identity is None:
@@ -41,9 +42,15 @@ def normalize_inventory(*, providers, channels, groups, channel_profiles, stream
                 item.update(identity=fingerprint(row.get('uuid')), uuid=str(row.get('uuid') or '')[:100],
                             tvg_id=str(row.get('tvg_id') or '')[:100])
             elif kind == 'streams':
+                item['name'] = ''  # Stream labels are unnecessary for URL/owner proof.
                 item.update(identity=fingerprint(row.get('url')), provider_id=identifier(row.get('m3u_account_id') or row.get('m3u_account')))
             else:
                 item['identity'] = None  # Names are suggestions, never identity proof.
+            if identity in seen:
+                if seen[identity] != item:
+                    raise ValueError('Dispatcharr inventory contains conflicting duplicate identifiers')
+                continue
+            seen[identity] = item
             result[kind].append(item)
     validate_inventory(result)
     return result
@@ -54,7 +61,7 @@ def validate_inventory(value):
         raise ValueError('Invalid Dispatcharr identity snapshot')
     for kind in KINDS:
         rows = value[kind]
-        if not isinstance(rows, list) or len(rows) > 200000:
+        if not isinstance(rows, list) or len(rows) > 500000:
             raise ValueError('Dispatcharr identity snapshot exceeds its limit')
         seen = set()
         for item in rows:
@@ -87,9 +94,20 @@ def capture_inventory():
     with udi._lock:
         if not udi._initialized:
             return None
-        return normalize_inventory(providers=udi._m3u_accounts_cache, channels=udi._channels_cache,
-                                   groups=udi._channel_groups_cache, channel_profiles=udi._channel_profiles_cache,
-                                   streams=udi._streams_cache)
+        try:
+            result = normalize_inventory(providers=udi._m3u_accounts_cache, channels=udi._channels_cache,
+                                         groups=udi._channel_groups_cache, channel_profiles=udi._channel_profiles_cache,
+                                         streams=udi._streams_cache)
+            from apps.backups.archive import MAX_JSON_BYTES
+            if len(json.dumps(result).encode('utf-8')) <= MAX_JSON_BYTES:
+                return result
+        except ValueError:
+            pass
+        # An incomplete/conflicting cache must not stop configuration backups.
+        # Omit proof rather than attach unverifiable history during restoration.
+        import logging
+        logging.getLogger(__name__).warning('Backup identity inventory unavailable; restore will require manual review')
+        return None
 
 
 def fetch_inventory():
@@ -99,6 +117,10 @@ def fetch_inventory():
         raise ValueError('Configure the target Dispatcharr connection first')
 
     class StrictFetcher(UDIFetcher):
+        def _fetch_paginated(self, base_url, **kwargs):
+            joiner = '&' if '?' in base_url else '?'
+            return super()._fetch_paginated(base_url + joiner + 'ordering=id', **kwargs)
+
         def _fetch_url(self, url):
             result = super()._fetch_url(url)
             if result is None:
@@ -116,6 +138,7 @@ def fetch_inventory():
             'providers': pool.submit(fetcher._fetch_url, fetcher.base_url + '/api/m3u/accounts/'),
             'groups': pool.submit(fetcher._fetch_url, fetcher.base_url + '/api/channels/groups/'),
             'channel_profiles': pool.submit(fetcher._fetch_url, fetcher.base_url + '/api/channels/profiles/'),
+            'ids': pool.submit(fetcher.fetch_all_ids),
         }
         values = {key: job.result() for key, job in jobs.items()}
     for key in ('channels', 'streams'):
@@ -123,6 +146,11 @@ def fetch_inventory():
         if value.expected_count is not None and len(value) != value.expected_count:
             raise ValueError('Dispatcharr returned incomplete inventory; retry the comparison')
         values[key] = value.items
+    identities = values.pop('ids')
     if any(not isinstance(value, list) for value in values.values()):
         raise ValueError('Dispatcharr returned invalid inventory')
-    return normalize_inventory(**values)
+    result = normalize_inventory(**values)
+    for kind in ('channels', 'streams'):
+        if identities.get(kind) != {row['id'] for row in result[kind]}:
+            raise ValueError('Dispatcharr inventory IDs changed or pages are incomplete; compare again')
+    return result

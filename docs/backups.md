@@ -9,6 +9,10 @@ Available on `dev`. Open **Backups** in the sidebar’s **System** section. A fr
 
 ![Verified backup confirmation](screenshots/backups-restore.png)
 
+![Dispatcharr assignment review](screenshots/backups-assignment-review.png)
+
+![Mapped restore measurement preview](screenshots/backups-assignment-preview.png)
+
 </details>
 
 ## Contents
@@ -24,6 +28,8 @@ Screenshots, logs, media files, derived logo caches and nested old migration/bac
 Archives contain stored connection credentials and may contain provider URLs. Downloaded files should be kept private. StreamFlow uses private file permissions and does not return those credentials in backup-list or verification-preview responses.
 
 ## Manual backup and restore
+
+Identical duplicate cache entries are collapsed in identity metadata. Conflicting, uninitialized or oversized cache inventories are omitted so configuration backups still work; these archives need manual review. Live comparison checks paginated record counts and the complete unique channel/stream ID sets, and remains paused if data is incomplete or changes during fetching.
 
 1. On **Backups → Create or upload**, choose **Include measurement history in this backup** and click **Create backup**. The operation runs in the background; the file appears under **Saved backups** when complete.
 2. Download the ZIP for storage elsewhere. **Upload backup** validates an existing StreamFlow ZIP before adding it to the list.
