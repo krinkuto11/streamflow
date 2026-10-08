@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Reviewed dependency updates (#473–480)** - Update frontend runtime/tooling, Recharts 3, Lucide 1, and GitHub checkout/container actions together. Upgrade React, React DOM and both React type packages as a compatible React 19 family, and group future React updates to avoid partial major upgrades.
+
 ### Fixed
 - **Heartbeat integration test synchronization** - The atomic snapshot test now explicitly exercises a leading pending heartbeat and coordinates its release-boundary observation, avoiding scheduler-dependent CI timeouts while retaining lock, capacity, snapshot, and redaction assertions.
 - **Dispatcharr throttle handling (#454)** - UDI GET retries honor numeric/date `Retry-After` and Django REST Framework throttle hints. Credential logins share a serialized cooldown, including direct login calls, and concurrent waiting refreshes can reuse the refreshed token. API-key authentication retains its existing flow.
