@@ -1,0 +1,77 @@
+name: Bug report
+description: Report a reproducible problem in StreamFlow.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues before reporting a bug. Include enough detail to reproduce it.
+        Remove passwords, API keys, tokens, and credential-bearing stream URLs from logs and screenshots.
+  - type: input
+    id: streamflow_version
+    attributes:
+      label: StreamFlow version
+      description: Give the exact version and image tag or commit, rather than just "latest" or "dev".
+      placeholder: "For example: 2.7.0, ghcr.io/krinkuto11/streamflow:2.7.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - Unraid Docker template
+        - Docker Compose
+        - Other Docker deployment
+        - Source checkout
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: What happened?
+      description: Describe the affected feature and the result you observed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the relevant settings or profile options. If it is intermittent, describe when it happens.
+      placeholder: |
+        1. Open ...
+        2. Configure ...
+        3. Run ...
+        4. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and related services
+      description: Include Dispatcharr's version, Teamarr's version if involved, and browser/OS if relevant. Mention whether this started after an update.
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste the error and nearby log lines with timestamps. Remove credentials and sensitive URLs first.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or additional context
+      description: Attach screenshots if they help explain the problem. Hide credentials and private information.
+    validations:
+      required: false
