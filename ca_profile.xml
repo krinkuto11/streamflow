@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommunityApplications>
+  <Profile>StreamFlow provides automated IPTV stream management for Dispatcharr. This repository contains the application and its Unraid Docker template. Stable releases are recommended for normal use; the dev image provides development builds. Report bugs and request support through the repository's GitHub issues.</Profile>
+  <Icon>https://raw.githubusercontent.com/krinkuto11/streamflow/main/frontend/public/streamflow-icon-192.png</Icon>
+  <WebPage>https://github.com/krinkuto11/streamflow</WebPage>
+</CommunityApplications>

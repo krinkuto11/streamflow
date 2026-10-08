@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Name>streamflow</Name>
+  <Repository>ghcr.io/krinkuto11/streamflow:latest</Repository>
+  <Registry>https://github.com/krinkuto11/streamflow/pkgs/container/streamflow</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/krinkuto11/streamflow/issues</Support>
+  <Project>https://github.com/krinkuto11/streamflow</Project>
+  <Overview>Automated IPTV stream management for Dispatcharr. Match streams with regex or TVG-ID, measure stream quality, manage provider capacity, schedule checks and monitor playback. Requires an existing Dispatcharr instance reachable from the container. Configure the connection in StreamFlow's setup wizard after installation.</Overview>
+  <Category>MediaApp:Video</Category>
+  <ExtraSearchTerms>dispatcharr iptv stream checker regex</ExtraSearchTerms>
+  <Icon>https://raw.githubusercontent.com/krinkuto11/streamflow/main/frontend/public/streamflow-icon-192.png</Icon>
+  <WebUI>http://[IP]:[PORT:5000]</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/krinkuto11/streamflow/main/templates/streamflow.xml</TemplateURL>
+  <ReadMe>https://raw.githubusercontent.com/krinkuto11/streamflow/main/docs/unraid.md</ReadMe>
+  <License>Apache-2.0</License>
+  <Requires>An existing Dispatcharr instance reachable from this container.</Requires>
+  <Screenshot>https://raw.githubusercontent.com/krinkuto11/streamflow/main/docs/screenshots/readme-dashboard-dark.png</Screenshot>
+  <Screenshot>https://raw.githubusercontent.com/krinkuto11/streamflow/main/docs/screenshots/readme-monitoring-matrix.png</Screenshot>
+  <DefaultTagDescription>Stable releases</DefaultTagDescription>
+  <Branch>
+    <Tag>dev</Tag>
+    <TagDescription>Development builds; review changes before updating.</TagDescription>
+  </Branch>
+  <Config Name="WebUI Port" Target="5000" Default="5000" Mode="tcp" Description="Host port for the StreamFlow web interface. Change this if port 5000 is already in use." Type="Port" Display="always" Required="true" Mask="false">5000</Config>
+  <Config Name="Appdata" Target="/app/data" Default="/mnt/user/appdata/streamflow" Mode="rw" Description="Persistent database, settings, regex rules and playback history. Use a separate directory for each StreamFlow installation." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/streamflow</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Description="User ID used to run StreamFlow. The default is Unraid's nobody user." Type="Variable" Display="advanced" Required="true" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Description="Group ID used to run StreamFlow. The default is Unraid's users group." Type="Variable" Display="advanced" Required="true" Mask="false">100</Config>
+</Container>
