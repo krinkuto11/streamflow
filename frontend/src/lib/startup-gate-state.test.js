@@ -149,12 +149,4 @@ describe('startup gate state', () => {
       pathname: '/dashboard',
     })).toBe(false)
   })
-  it('keeps restore accessible while Dispatcharr startup is blocked', () => {
-    expect(shouldRedirectForStartupGate({
-      setupComplete: true,
-      initializationChecked: true,
-      initialization: { inProgress: true },
-      pathname: '/backups',
-    })).toBe(false)
-  })
 })

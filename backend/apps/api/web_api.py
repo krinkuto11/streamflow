@@ -23,13 +23,6 @@ from flask import Flask, request, jsonify, make_response, Response
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-# A direct Python launch uses the same offline restore path as the container.
-# This must happen before imports can open SQLite connections or load settings.
-if __name__ == '__main__':
-    from apps.backups.restore import apply_pending_restore
-    _startup_config = Path(os.environ.get('CONFIG_DIR', str(Path(__file__).parent.parent / 'data')))
-    apply_pending_restore(_startup_config)
-
 from apps.automation.automated_stream_manager import AutomatedStreamManager, RegexChannelMatcher
 from apps.automation.automation_events_scheduler import get_events_scheduler
 from apps.automation.regex_validation import is_dangerous_regex
@@ -338,18 +331,6 @@ app = Flask(__name__, static_folder=None)
 from apps.api.status_etags import install_status_etags
 install_status_etags(app)
 CORS(app)  # Enable CORS for React frontend
-from apps.api.backup_handlers import create_backup_blueprint
-from apps.backups.service import get_backup_service
-app.register_blueprint(create_backup_blueprint(get_backup_service))
-
-
-@app.before_request
-def _backup_maintenance_gate():
-    from apps.backups import service as backup_module
-    service = backup_module._service
-    if service is not None and service.maintenance and request.path.startswith('/api/') and request.path != '/api/backups':
-        from apps.core.api_responses import error_response
-        return error_response('A restore is preparing to restart StreamFlow', status_code=503, code='restore_in_progress')
 
 
 @app.before_request
@@ -2665,11 +2646,6 @@ if __name__ == '__main__':
     
     if not args.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         logger.info("Starting background services (active process)...")
-        from apps.backups.runtime import configure_runtime
-        backup_service = get_backup_service()
-        configure_runtime(backup_service, automation_provider=lambda: automation_manager,
-                          stop_processors=(stop_scheduled_event_processor, stop_epg_refresh_processor, stop_udi_refresh_processor))
-        backup_service.start()
         
         try:
             if not check_wizard_complete():
@@ -2701,7 +2677,6 @@ if __name__ == '__main__':
             
             def graceful_shutdown(signum, frame):
                 logger.info(f"Received signal {signum}. Starting graceful shutdown...")
-                backup_service.stop()
                 
                 try:
                     from apps.stream.stream_monitoring_service import get_monitoring_service

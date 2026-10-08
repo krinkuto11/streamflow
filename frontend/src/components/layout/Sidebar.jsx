@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { Link, useLocation } from 'react-router-dom'
 import {
-  Activity, Archive, Calendar, CalendarCheck, CheckCircle, ChevronLeft, ChevronRight,
+  Activity, Calendar, CalendarCheck, CheckCircle, ChevronLeft, ChevronRight,
   CircleHelp, Eye, History, LayoutDashboard, ListChecks, Menu, Settings,
   TrendingUp, X,
 } from 'lucide-react'
@@ -38,7 +38,6 @@ const navigationGroups = [
     label: 'System',
     items: [
       { text: 'Settings', icon: Settings, path: '/settings' },
-      { text: 'Backups', icon: Archive, path: '/backups' },
       { text: 'Help', icon: CircleHelp, path: '/help' },
     ],
   },
@@ -90,8 +89,8 @@ export function Sidebar({ isCollapsed, setIsCollapsed, navigationDisabled = fals
 
   const renderLink = (item, compact = false) => {
     const Icon = item.icon
-    const isDisabled = navigationDisabled && !['/', '/backups'].includes(item.path)
-    const isActive = currentItem.path === item.path && !isDisabled
+    const isDisabled = navigationDisabled && item.path !== '/'
+    const isActive = currentItem.path === item.path && (!navigationDisabled || item.path === '/')
     return (
       <Link
         key={item.path}

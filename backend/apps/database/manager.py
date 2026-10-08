@@ -447,26 +447,6 @@ class DatabaseManager:
         finally:
             session.close()
 
-    def set_system_settings_multi(self, values: Dict[str, Any]) -> bool:
-        """Persist related settings together, or retain the previous values."""
-        from apps.database.models import SystemSetting
-        session = self._get_session()
-        try:
-            existing = {row.key: row for row in session.query(SystemSetting).filter(SystemSetting.key.in_(values)).all()}
-            for key, value in values.items():
-                if key in existing:
-                    existing[key].value = value
-                else:
-                    session.add(SystemSetting(key=key, value=value))
-            session.commit()
-            return True
-        except Exception:
-            session.rollback()
-            logger.exception('Related system settings could not be saved')
-            return False
-        finally:
-            session.close()
-
     # === Channel Regex Configs ===
 
     def _regex_config_to_dict(self, cfg) -> Dict[str, Any]:

@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Input } from '@/components/ui/input.jsx'
@@ -272,7 +271,6 @@ export default function SetupWizard({ onComplete }) {
         <CardHeader className="text-center">
           <CardTitle className="text-2xl font-bold">StreamFlow Setup</CardTitle>
           <CardDescription>Connect your instance to Dispatcharr to begin monitoring.</CardDescription>
-          <Link className="text-sm text-primary underline" to="/backups">Restore a backup</Link>
         </CardHeader>
         <CardContent>
           <div className="mb-8">

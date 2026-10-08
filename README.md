@@ -20,7 +20,6 @@ profiles for individual channels and groups.
 - **Shadow Monitor:** optional viewer-side monitoring and recovery for active channels, with its own watcher identity and channel scope.
 - **Playback stability history:** optionally record delivery stalls and source switches from existing Dispatcharr viewer sessions without opening another provider connection; persist history and opt selected profiles into stability-based score deductions.
 - **Dashboard and analytics:** run stages, checked/good/dead/hidden/restored counters, schedules, playback status and historical charts.
-- **Backup and restore (dev):** a dedicated Backups page with manual backups, configurable automatic schedules, retention, download/upload and checked restoration; optionally include measurement history. Choose the storage folder with `BACKUP_DIR` and a persistent volume.
 - **Appearance and Help:** responsive desktop/mobile navigation, Light/Dark/Auto/Matrix appearance, and in-app operator guides with setting locations.
 - **Hardware and API:** CPU probing by default, optional supported hardware acceleration with CPU fallback, and a REST API.
 
@@ -101,7 +100,6 @@ For setup, capacity, hardware and troubleshooting details, use the in-app
 | [Stream matching](docs/stream-matching.md) | Regex, TVG-ID, provider priorities, bulk assignment and validation |
 | [Stream checking](docs/stream-checking.md) | Measurements, scoring, dead streams and concurrency limits |
 | [Stream monitoring](docs/stream-monitoring.md) | Sessions, source reliability, timelines, screenshots and OpenStream |
-| [Backup and restore](docs/backups.md) | Backup contents, scheduling, storage paths and recovery (dev) |
 | [Playback stability](docs/dev-playback-stability-changelog-20261007.md) | Optional passive history, scoring, settings and measurement limits |
 | [Matrix appearance](docs/matrix-theme.md) | Palette, appearance selection and validation |
 | [REST API](docs/API.md) | API reference |

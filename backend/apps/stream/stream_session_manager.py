@@ -316,9 +316,6 @@ class StreamSessionManager:
         logger.info("StreamSessionManager initialized with SQL backend")
 
         self._load_sessions()
-        from apps.backups.history import restore_monitoring_history
-        from apps.database.connection import CONFIG_DIR
-        restore_monitoring_history(self, CONFIG_DIR)
 
     def _load_settings(self): pass
     def save_settings(self): pass
