@@ -9,6 +9,7 @@ from flask import jsonify
 from apps.automation.regex_settings import default_channel_regex_global_settings
 from apps.core.atomic_json import atomic_write_json
 from apps.core.logging_config import setup_logging
+from apps.background.setup_startup import initialize_setup_data
 
 logger = setup_logging(__name__)
 
@@ -19,6 +20,7 @@ def get_setup_wizard_status_response(
     get_automation_config_manager: Callable[[], Any],
     get_dispatcharr_config: Callable[[], Any],
     get_udi_manager: Callable[[], Any],
+    on_initialized: Optional[Callable[[], Any]] = None,
 ):
     """Handle setup wizard status retrieval."""
     try:
@@ -57,8 +59,8 @@ def get_setup_wizard_status_response(
                     if status["dispatcharr_connection"]:
                         if not udi.is_initialized():
                             threading.Thread(
-                                target=udi.initialize,
-                                kwargs={"force_refresh": False},
+                                target=initialize_setup_data,
+                                kwargs={"udi": udi, "force_refresh": False, "on_initialized": on_initialized},
                                 daemon=True,
                             ).start()
                         status["has_channels"] = bool(getattr(udi, "_channels_cache", []))
