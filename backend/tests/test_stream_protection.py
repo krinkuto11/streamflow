@@ -89,6 +89,7 @@ class TestStreamProtection(unittest.TestCase):
         
         session.streams = {101: curr_stream, 102: candidate}
         self.service.session_manager.get_session.return_value = session
+        self.service.session_manager.get_session_owner.return_value = session_id
         
         mock_udi = MagicMock()
         mock_get_udi.return_value = mock_udi
@@ -142,6 +143,7 @@ class TestStreamProtection(unittest.TestCase):
         
         session.streams = {201: curr, 202: cand}
         self.service.session_manager.get_session.return_value = session
+        self.service.session_manager.get_session_owner.return_value = session_id
         
         mock_udi = MagicMock()
         mock_get_udi.return_value = mock_udi
@@ -190,6 +192,7 @@ class TestStreamProtection(unittest.TestCase):
         
         session.streams = {301: curr, 302: cand}
         self.service.session_manager.get_session.return_value = session
+        self.service.session_manager.get_session_owner.return_value = session_id
         
         mock_udi = MagicMock()
         mock_get_udi.return_value = mock_udi
@@ -233,6 +236,7 @@ class TestStreamProtection(unittest.TestCase):
         
         session.streams = {401: curr, 402: cand}
         self.service.session_manager.get_session.return_value = session
+        self.service.session_manager.get_session_owner.return_value = session_id
         
         mock_udi = MagicMock()
         mock_get_udi.return_value = mock_udi

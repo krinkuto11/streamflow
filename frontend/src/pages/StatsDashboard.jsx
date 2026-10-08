@@ -89,7 +89,7 @@ export default function StatsDashboard() {
     <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent">
+          <h1 className="text-3xl font-bold tracking-tight bg-linear-to-r from-primary to-primary/60 bg-clip-text text-transparent">
             System Analytics
           </h1>
           <p className="text-muted-foreground mt-1">Telemetry, health, and performance of automation jobs.</p>
@@ -111,14 +111,14 @@ export default function StatsDashboard() {
 
       <Tabs defaultValue="overview" className="w-full">
         <TabsList className="grid w-full grid-cols-3 max-w-md bg-muted/50 p-1">
-          <TabsTrigger value="overview" className="data-[state=active]:bg-background data-[state=active]:shadow-sm transition-all">Overview</TabsTrigger>
-          <TabsTrigger value="providers" className="data-[state=active]:bg-background data-[state=active]:shadow-sm transition-all">Providers</TabsTrigger>
-          <TabsTrigger value="channels" className="data-[state=active]:bg-background data-[state=active]:shadow-sm transition-all">Channels</TabsTrigger>
+          <TabsTrigger value="overview" className="data-[state=active]:bg-background data-[state=active]:shadow-xs transition-all">Overview</TabsTrigger>
+          <TabsTrigger value="providers" className="data-[state=active]:bg-background data-[state=active]:shadow-xs transition-all">Providers</TabsTrigger>
+          <TabsTrigger value="channels" className="data-[state=active]:bg-background data-[state=active]:shadow-xs transition-all">Channels</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="mt-6 space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <Card className="border-none shadow-md bg-card/50 backdrop-blur-sm">
+            <Card className="border-none shadow-md bg-card/50 backdrop-blur-xs">
               <CardHeader>
                 <CardTitle>Execution Duration</CardTitle>
                 <CardDescription>Automated script runtimes over {days} days</CardDescription>
@@ -141,7 +141,7 @@ export default function StatsDashboard() {
               </CardContent>
             </Card>
 
-            <Card className="border-none shadow-md bg-card/50 backdrop-blur-sm">
+            <Card className="border-none shadow-md bg-card/50 backdrop-blur-xs">
               <CardHeader>
                 <CardTitle>Stream Churn Over Time</CardTitle>
                 <CardDescription>Global dead vs total channels processed</CardDescription>
@@ -168,7 +168,7 @@ export default function StatsDashboard() {
         </TabsContent>
 
         <TabsContent value="providers" className="mt-6 space-y-6">
-          <Card className="border-none shadow-md bg-card/50 backdrop-blur-sm">
+          <Card className="border-none shadow-md bg-card/50 backdrop-blur-xs">
             <CardHeader>
               <CardTitle>Provider Health & Availability</CardTitle>
               <CardDescription>Available vs dead streams mapped to provider accounts</CardDescription>
@@ -193,7 +193,7 @@ export default function StatsDashboard() {
           </Card>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <Card className="border-none shadow-md bg-card/50 backdrop-blur-sm">
+            <Card className="border-none shadow-md bg-card/50 backdrop-blur-xs">
               <CardHeader className="flex flex-row items-center justify-between">
                 <div>
                   <CardTitle>{providerMetric === 'quality' ? 'Average Quality Score' : 'Resolution Distribution'}</CardTitle>
@@ -236,7 +236,7 @@ export default function StatsDashboard() {
               </CardContent>
             </Card>
 
-            <Card className="border-none shadow-md bg-card/50 backdrop-blur-sm">
+            <Card className="border-none shadow-md bg-card/50 backdrop-blur-xs">
               <CardHeader>
                 <CardTitle>Average Bitrate</CardTitle>
                 <CardDescription>Average kbps by provider</CardDescription>
@@ -261,7 +261,7 @@ export default function StatsDashboard() {
         </TabsContent>
 
         <TabsContent value="channels" className="mt-6">
-          <Card className="border-none shadow-md bg-card/50 backdrop-blur-sm">
+          <Card className="border-none shadow-md bg-card/50 backdrop-blur-xs">
             <CardHeader className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
               <div>
                 <CardTitle>Channel History Matrix</CardTitle>
@@ -282,7 +282,7 @@ export default function StatsDashboard() {
               {!selectedChannel ? (
                 <div className="flex items-center justify-center py-12 text-muted-foreground bg-muted/20 rounded-lg">
                   <div className="text-center">
-                    <div className="inline-block p-4 bg-background rounded-full mb-4 shadow-sm border">
+                    <div className="inline-block p-4 bg-background rounded-full mb-4 shadow-xs border">
                       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide text-primary"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m3 15 2 2 4-4"/></svg>
                     </div>
                     <h3 className="text-lg font-medium text-foreground">Specify a Channel ID</h3>

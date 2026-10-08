@@ -32,7 +32,7 @@ class TestPreflightPreservesChannelAssignments(unittest.TestCase):
         udi.fetcher.fetch_channel_by_id.assert_called_once_with(906)
         udi.update_channel.assert_called_once_with(906, fresh_channel)
 
-    def test_removal_disabled_write_back_keeps_all_assigned_stream_ids(self):
+    def test_removal_disabled_write_back_keeps_truly_uncached_assigned_stream_ids(self):
         from apps.stream.stream_checker_service import StreamCheckerService
 
         assigned_ids = [10, 11, 12, 13, 14, 15, 16]
@@ -40,15 +40,55 @@ class TestPreflightPreservesChannelAssignments(unittest.TestCase):
 
         missing_assigned_ids = StreamCheckerService._get_uncached_channel_stream_ids(
             assigned_ids,
-            set(reordered_ids),
+            {10, 11, 15, 16},
             dead_stream_removal_enabled=False,
             dead_stream_ids={12, 13},
         )
         reordered_ids.extend(missing_assigned_ids)
 
-        self.assertEqual(reordered_ids, [16, 15, 10, 11, 12, 13, 14])
+        self.assertEqual(reordered_ids, [16, 15, 12, 13, 14])
 
-    def test_removal_disabled_valid_ids_include_assigned_cache_misses(self):
+    def test_stream_limit_does_not_resurrect_ranked_out_cached_streams(self):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        assigned_ids = [10, 11, 12, 13, 14, 15, 16]
+        cached_ids = set(assigned_ids)
+        ranked_and_limited_ids = [16, 15]
+
+        missing = StreamCheckerService._get_uncached_channel_stream_ids(
+            assigned_ids,
+            cached_ids,
+            dead_stream_removal_enabled=False,
+            dead_stream_ids=set(),
+        )
+        final_ids = StreamCheckerService._limit_write_back_stream_ids(
+            ranked_and_limited_ids + missing,
+            stream_limit=2,
+            protected_stream_ids=set(),
+        )
+
+        self.assertEqual(missing, [])
+        self.assertEqual(final_ids, [16, 15])
+
+    def test_true_cache_miss_still_respects_limit_and_active_viewer(self):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        missing = StreamCheckerService._get_uncached_channel_stream_ids(
+            [10, 11, 12],
+            {10, 11},
+            dead_stream_removal_enabled=False,
+            dead_stream_ids=set(),
+        )
+        final_ids = StreamCheckerService._limit_write_back_stream_ids(
+            [11, 10] + missing,
+            stream_limit=2,
+            protected_stream_ids={12},
+        )
+
+        self.assertEqual(missing, [12])
+        self.assertEqual(final_ids, [11, 12])
+
+    def test_removal_disabled_passes_only_cached_ids_to_authoritative_writer(self):
         from apps.stream.stream_checker_service import StreamCheckerService
 
         udi = Mock()
@@ -56,11 +96,10 @@ class TestPreflightPreservesChannelAssignments(unittest.TestCase):
 
         valid_ids = StreamCheckerService._build_write_back_valid_stream_ids(
             udi,
-            [10, 11, 12, 13, 14, 15, 16],
             dead_stream_removal_enabled=False,
         )
 
-        self.assertEqual(valid_ids, {10, 11, 12, 13, 14, 15, 16})
+        self.assertEqual(valid_ids, {10, 11})
 
     def test_removal_enabled_keeps_existing_dead_filtering_behavior(self):
         from apps.stream.stream_checker_service import StreamCheckerService
@@ -73,7 +112,6 @@ class TestPreflightPreservesChannelAssignments(unittest.TestCase):
         )
         valid_ids = StreamCheckerService._build_write_back_valid_stream_ids(
             Mock(),
-            [10, 11, 12, 13, 14],
             dead_stream_removal_enabled=True,
         )
 
@@ -91,16 +129,18 @@ class TestPreflightPreservesChannelAssignments(unittest.TestCase):
             {
                 'channel_id': 906,
                 'assigned': [10, 11, 12, 13, 14, 15, 16],
+                'cached': {10, 11, 15, 16},
                 'reordered': [16, 15],
                 'dead': {12, 13},
-                'expected_write_back': [16, 15, 10, 11, 12, 13, 14],
+                'expected_write_back': [16, 15, 12, 13, 14],
             },
             {
                 'channel_id': 907,
                 'assigned': [20, 21, 22, 23],
+                'cached': {20, 22},
                 'reordered': [22],
                 'dead': {21},
-                'expected_write_back': [22, 20, 21, 23],
+                'expected_write_back': [22, 21, 23],
             },
         ]
 
@@ -110,19 +150,18 @@ class TestPreflightPreservesChannelAssignments(unittest.TestCase):
                 write_back_ids.extend(
                     service._get_uncached_channel_stream_ids(
                         case['assigned'],
-                        set(write_back_ids),
+                        case['cached'],
                         dead_stream_removal_enabled=False,
                         dead_stream_ids=case['dead'],
                     )
                 )
                 valid_ids = service._build_write_back_valid_stream_ids(
                     udi,
-                    case['assigned'],
                     dead_stream_removal_enabled=False,
                 )
 
                 self.assertEqual(write_back_ids, case['expected_write_back'])
-                self.assertTrue(set(case['assigned']).issubset(valid_ids))
+                self.assertEqual(valid_ids, udi.get_valid_stream_ids.return_value)
 
     def test_multiple_channels_still_drop_dead_assignments_when_removal_enabled(self):
         from apps.stream.stream_checker_service import StreamCheckerService
@@ -132,16 +171,18 @@ class TestPreflightPreservesChannelAssignments(unittest.TestCase):
             {
                 'channel_id': 906,
                 'assigned': [10, 11, 12, 13, 14, 15, 16],
+                'cached': {10, 11, 15, 16},
                 'reordered': [16, 15],
                 'dead': {12, 13},
-                'expected_write_back': [16, 15, 10, 11, 14],
+                'expected_write_back': [16, 15, 14],
             },
             {
                 'channel_id': 907,
                 'assigned': [20, 21, 22, 23],
+                'cached': {20, 22},
                 'reordered': [22],
                 'dead': {21, 23},
-                'expected_write_back': [22, 20],
+                'expected_write_back': [22],
             },
         ]
 
@@ -151,14 +192,13 @@ class TestPreflightPreservesChannelAssignments(unittest.TestCase):
                 write_back_ids.extend(
                     service._get_uncached_channel_stream_ids(
                         case['assigned'],
-                        set(write_back_ids),
+                        case['cached'],
                         dead_stream_removal_enabled=True,
                         dead_stream_ids=case['dead'],
                     )
                 )
                 valid_ids = service._build_write_back_valid_stream_ids(
                     Mock(),
-                    case['assigned'],
                     dead_stream_removal_enabled=True,
                 )
 

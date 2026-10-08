@@ -44,6 +44,7 @@ class TestEmptyChannelFill(unittest.TestCase):
         
         session.streams = {101: s1, 102: s2}
         self.mock_session_manager.get_session.return_value = session
+        self.mock_session_manager.get_session_owner.return_value = session.session_id
         
         # 2. Mock UDI to return EMPTY channel (no streams currently in channel)
         # get_channel_by_id returns dict with 'streams' list

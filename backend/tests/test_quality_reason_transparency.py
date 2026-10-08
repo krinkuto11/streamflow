@@ -458,6 +458,43 @@ def test_deferred_bitrate_recheck_requires_strict_boolean_authority():
     assert "bitrate_recheck_attempted" not in malformed
 
 
+def test_deferred_bitrate_recheck_can_be_disabled_by_config():
+    service = object.__new__(StreamCheckerService)
+
+    class _Config:
+        @staticmethod
+        def get(key, default=None):
+            if key == "stream_analysis.bitrate_recheck_enabled":
+                return False
+            return default
+
+    service.config = _Config()
+    initial = {
+        "stream_id": 10,
+        "status": "OK",
+        "bitrate_kbps": None,
+        "measurement_incomplete": True,
+        "measurement_incomplete_reason": "missing_bitrate",
+        "bitrate_recheck_required": True,
+    }
+    called = False
+
+    def recheck(_stream, _initial):
+        nonlocal called
+        called = True
+        return {"status": "OK", "bitrate_kbps": 1200}
+
+    service._run_deferred_bitrate_rechecks(
+        [initial],
+        {10: {"id": 10}},
+        recheck,
+    )
+
+    assert called is False
+    assert "bitrate_recheck_attempted" not in initial
+    assert initial["bitrate_recheck_required"] is True
+
+
 def test_incomplete_bitrate_status_exposes_exhausted_recheck_reason():
     target = {}
     source = {

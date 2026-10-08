@@ -85,10 +85,11 @@ def _sanitize_resolution(res_str):
     except ValueError:
         return None, None
 
-def _get_provider_id(m3u_account_name, session):
-    from apps.udi import get_udi_manager
-    udi = get_udi_manager()
-    accounts = udi.get_m3u_accounts() if udi else []
+def _get_provider_id(m3u_account_name, session, accounts=None):
+    if accounts is None:
+        from apps.udi import get_udi_manager
+        udi = get_udi_manager()
+        accounts = udi.get_m3u_accounts() if udi else []
     if accounts:
         for acc in accounts:
             if acc.get('name') == m3u_account_name or acc.get('id') == m3u_account_name:
@@ -163,7 +164,6 @@ def save_automation_run_telemetry(action, details, subentries=None, timestamp=No
                     dead_streams=0
                 )
                 session.add(channel_health)
-                session.flush()
                 
                 for step in c.get('steps', []):
                     if step.get('step') == 'Quality Check':
@@ -178,6 +178,7 @@ def save_automation_run_telemetry(action, details, subentries=None, timestamp=No
                         # Process dead streams
                         from apps.udi import get_udi_manager
                         udi = get_udi_manager()
+                        accounts = udi.get_m3u_accounts() if udi else []
                         
                         for ds in dead_streams:
                             stream_id = ds.get('id', ds.get('stream_id', 0))
@@ -185,7 +186,9 @@ def save_automation_run_telemetry(action, details, subentries=None, timestamp=No
                             try:
                                 provider_ident = ds.get('m3u_account')
                                 if provider_ident:
-                                    provider_id = _get_provider_id(provider_ident, session)
+                                    provider_id = _get_provider_id(
+                                        provider_ident, session, accounts
+                                    )
                                 
                                 if not provider_id and udi:
                                     stream_obj = udi.get_stream_by_id(stream_id)
@@ -210,7 +213,9 @@ def save_automation_run_telemetry(action, details, subentries=None, timestamp=No
                                 run_id=run.id,
                                 channel_id=channel_id,
                                 stream_id=cs.get('stream_id', 0),
-                                provider_id=_get_provider_id(provider_ident, session),
+                                provider_id=_get_provider_id(
+                                    provider_ident, session, accounts
+                                ),
                                 bitrate_kbps=_sanitize_bitrate(cs.get('bitrate')),
                                 resolution_width=width,
                                 resolution_height=height,
@@ -281,10 +286,14 @@ def save_generic_telemetry(action, details, subentries=None, timestamp=None):
                             dead_streams=stats.get('dead_streams', 0)
                         )
                         session.add(ch)
-                        session.flush()
 
                         # Save individual stream stats if present in generic item
                         stream_details = stats.get('stream_details', [])
+                        accounts = None
+                        if stream_details:
+                            from apps.udi import get_udi_manager
+                            udi = get_udi_manager()
+                            accounts = udi.get_m3u_accounts() if udi else []
                         for s_det in stream_details:
                             width, height = _sanitize_resolution(s_det.get('resolution'))
                             provider_ident = s_det.get('m3u_account')
@@ -292,7 +301,9 @@ def save_generic_telemetry(action, details, subentries=None, timestamp=None):
                                 run_id=run.id,
                                 channel_id=cid,
                                 stream_id=s_det.get('stream_id', 0),
-                                provider_id=_get_provider_id(provider_ident, session),
+                                provider_id=_get_provider_id(
+                                    provider_ident, session, accounts
+                                ),
                                 bitrate_kbps=_sanitize_bitrate(s_det.get('bitrate')),
                                 resolution_width=width,
                                 resolution_height=height,

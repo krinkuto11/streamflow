@@ -26,9 +26,9 @@ sys.path.insert(0, str(backend_dir))
 class TestUDICacheSyncAfterStatsUpdate(unittest.TestCase):
     """Test that UDI cache is synced after stream stats updates."""
     
-    @patch('stream_checker_service.get_udi_manager')
-    @patch('stream_checker_service.patch_request')
-    @patch('stream_checker_service._get_base_url')
+    @patch('apps.core.api_utils.get_udi_manager')
+    @patch('apps.core.api_utils.patch_request')
+    @patch('apps.core.api_utils._get_base_url')
     def test_udi_cache_updated_after_stats_patch(self, mock_base_url, mock_patch, mock_get_udi):
         """Test that UDI cache is updated after successful stats PATCH."""
         from apps.stream.stream_checker_service import StreamCheckerService
@@ -104,9 +104,9 @@ class TestUDICacheSyncAfterStatsUpdate(unittest.TestCase):
         self.assertEqual(updated_stream_data['stream_stats'], expected_stats, 
                         "UDI cache should be updated with the new stats")
     
-    @patch('stream_checker_service.get_udi_manager')
-    @patch('stream_checker_service.patch_request')
-    @patch('stream_checker_service._get_base_url')
+    @patch('apps.core.api_utils.get_udi_manager')
+    @patch('apps.core.api_utils.patch_request')
+    @patch('apps.core.api_utils._get_base_url')
     def test_udi_cache_not_updated_on_patch_failure(self, mock_base_url, mock_patch, mock_get_udi):
         """Test that UDI cache is not updated if PATCH fails."""
         from apps.stream.stream_checker_service import StreamCheckerService
@@ -146,9 +146,9 @@ class TestUDICacheSyncAfterStatsUpdate(unittest.TestCase):
         # Verify UDI cache was NOT updated
         mock_udi.update_stream.assert_not_called()
     
-    @patch('stream_checker_service.get_udi_manager')
-    @patch('stream_checker_service.patch_request')
-    @patch('stream_checker_service._get_base_url')
+    @patch('apps.core.api_utils.get_udi_manager')
+    @patch('apps.core.api_utils.patch_request')
+    @patch('apps.core.api_utils._get_base_url')
     def test_udi_cache_handles_json_string_stats(self, mock_base_url, mock_patch, mock_get_udi):
         """Test that UDI cache update works when existing stats are JSON string."""
         from apps.stream.stream_checker_service import StreamCheckerService

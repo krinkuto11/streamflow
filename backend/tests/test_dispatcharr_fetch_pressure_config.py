@@ -287,7 +287,7 @@ def test_fetch_url_retries_transient_timeout(monkeypatch):
             raise fetcher_module.requests.exceptions.ReadTimeout("slow page")
         return Response()
 
-    monkeypatch.setattr(fetcher_module.requests, "get", fake_get)
+    monkeypatch.setattr(fetcher_module.http_transport, "get", fake_get)
     monkeypatch.setattr(fetcher_module, "_get_auth_headers", lambda: {"Authorization": "Bearer token"})
     monkeypatch.setattr(fetcher_module.time, "sleep", lambda seconds: None)
 

@@ -1,6 +1,6 @@
 
 import logging
-from typing import List, Dict, Optional, Any, Set, Tuple
+from typing import List, Dict, Optional, Any, Set, Tuple, Iterable
 from contextlib import contextmanager
 from sqlalchemy import asc, desc
 from sqlalchemy.orm import Session
@@ -220,6 +220,43 @@ class DatabaseManager:
         session = self._get_session()
         try:
             return session.query(DeadStream).filter(DeadStream.url == url).first() is not None
+        finally:
+            session.close()
+
+    def get_dead_stream_reason(self, url: str) -> Optional[str]:
+        """Read one reason without loading every tracked stream."""
+        session = self._get_session()
+        try:
+            row = session.query(DeadStream.reason).filter(DeadStream.url == url).first()
+            return row[0] if row else None
+        finally:
+            session.close()
+
+    def get_dead_stream_reasons(self, urls: Optional[Iterable[str]] = None) -> Dict[str, Optional[str]]:
+        """Read URL/reason pairs, scoped to requested URLs when provided."""
+        session = self._get_session()
+        try:
+            query = session.query(DeadStream.url, DeadStream.reason)
+            if urls is None:
+                return dict(query.all())
+            requested = list(dict.fromkeys(urls))
+            if not requested:
+                return {}
+            reasons = {}
+            # SQLite builds shipped with older NAS systems can have a 999
+            # placeholder limit. Keep channel writes safe for large lists.
+            for start in range(0, len(requested), 900):
+                reasons.update(query.filter(DeadStream.url.in_(requested[start:start + 900])).all())
+            return reasons
+        finally:
+            session.close()
+
+    def get_dead_stream_info(self, url: str) -> Optional[Dict[str, Any]]:
+        """Read one tracked entry for a revival log message."""
+        session = self._get_session()
+        try:
+            row = session.query(DeadStream).filter(DeadStream.url == url).first()
+            return _model_to_dict(row) if row else None
         finally:
             session.close()
 

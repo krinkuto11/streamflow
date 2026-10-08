@@ -233,6 +233,9 @@ class MonitoringSession(Base):
     current_speed = Column(Float, default=0.0)
     current_bitrate = Column(Integer, default=0)
     raw_info = Column(JSON, nullable=True)
+    # Metrics backend: 'ffmpeg' (per-stream ffmpeg probe) or 'openstream' (swarm
+    # health from an OpenStream server). Determines how reliability is sourced.
+    session_type = Column(String(20), default='ffmpeg')
 
 
 class DeadStream(Base):
@@ -327,6 +330,22 @@ class Run(Base):
 
     channel_healths = relationship("ChannelHealth", back_populates="run", cascade="all, delete-orphan")
     stream_telemetries = relationship("StreamTelemetry", back_populates="run", cascade="all, delete-orphan")
+
+
+class PlaybackObservation(Base):
+    """Checkpoints of passive playback legs; no viewer identity or source URLs."""
+    __tablename__ = 'playback_observations'
+
+    id = Column(String(32), primary_key=True)
+    channel_id = Column(Integer, nullable=False, index=True)
+    stream_id = Column(Integer, nullable=False, index=True)
+    source_fingerprint = Column(String(64), nullable=False)
+    last_seen = Column(Float, nullable=False, index=True)
+    observed_seconds = Column(Float, nullable=False, default=0)
+    stalled_seconds = Column(Float, nullable=False, default=0)
+    samples = Column(Integer, nullable=False, default=0)
+    stalls = Column(Integer, nullable=False, default=0)
+    failovers = Column(Integer, nullable=False, default=0)
 
 
 class ChannelHealth(Base):

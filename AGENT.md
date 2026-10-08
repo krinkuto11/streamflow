@@ -24,7 +24,8 @@ Use it to decide where changes belong before editing code.
   - `automation_config_manager.py`: profile/period/assignment persistence and behavior toggles.
   - `automated_stream_manager.py`: update/matching pipeline coordination.
 - `stream/`: stream checking, session tracking, runtime transport helpers.
-  - `stream_checker_service.py`: large orchestrator for stream checks.
+  - `stream_checker_service.py`: public service facade, state owner, and worker/scheduler lifecycle.
+  - `checker/`: extracted queue/ownership, inventory/capacity, classification, connectivity, status, and execution behaviors; see `docs/stream-checker-architecture.md`.
   - `stream_checker_components.py`: extracted stream-checking support components.
   - `acestream_session_service.py`: AceStream session lifecycle/scoring logic.
   - `udp_proxy.py`: runtime UDP proxy behavior.
@@ -70,7 +71,7 @@ Use it to decide where changes belong before editing code.
 
 ### D) Change stream checking or ranking behavior
 
-1. Core behavior: `backend/apps/stream/stream_checker_service.py`.
+1. Locate the owning behavior under `backend/apps/stream/checker/` using `docs/stream-checker-architecture.md`; keep state initialization and lifecycle in `stream_checker_service.py`.
 2. Prefer adding reusable helpers in `backend/apps/stream/stream_checker_components.py`.
 3. Update related APIs in `backend/apps/api/stream_checker_handlers.py`.
 4. Validate with targeted tests under `backend/tests/test_stream_*` and relevant automation integration tests.

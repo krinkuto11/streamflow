@@ -45,8 +45,8 @@ class TestForceUpdate(unittest.TestCase):
             os.environ['CONFIG_DIR'] = self.old_config_dir
 
     @patch('stream_monitoring_service.get_udi_manager')
-    def test_force_update_triggers_sync(self, mock_get_udi):
-        """Test that force_update=True triggers sync even if order is same."""
+    def test_force_update_does_not_patch_unchanged_assignment(self, mock_get_udi):
+        """Recalculation after a status change must not generate a no-op PATCH."""
         session_id = 'test_sess'
         chan_id = 99
         
@@ -79,15 +79,16 @@ class TestForceUpdate(unittest.TestCase):
             self.service._evaluate_session_streams(session_id, force_update=False)
             mock_update.assert_not_called()
             
-        # Case 2: Forced update (force_update=True)
-        # Should trigger update even though order is same
-        with patch('api_utils.update_channel_streams') as mock_update:
-            mock_update.return_value = True
-            
+        # Case 2: A forced recalculation keeps the same assignment.
+        with patch('api_utils.update_channel_streams') as mock_update, \
+             patch('api_utils.fetch_data_from_url') as mock_dispatcharr_get, \
+             patch('api_utils.patch_request') as mock_dispatcharr_patch:
             self.service._evaluate_session_streams(session_id, force_update=True)
-            
-            mock_update.assert_called_with(chan_id, [101])
-            mock_udi.refresh_channel_by_id.assert_called_with(chan_id)
+
+            mock_update.assert_not_called()
+            mock_dispatcharr_get.assert_not_called()
+            mock_dispatcharr_patch.assert_not_called()
+            mock_udi.refresh_channel_by_id.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()

@@ -43,6 +43,8 @@ from apps.udi.fetcher import (
     ProxyStatusPayloadError,
     ProxyStatusTransportError,
 )
+from apps.udi.channel_metadata import ChannelMetadataMixin
+from apps.core.request_coalescing import SingleFlight
 from apps.udi.cache import UDICache
 from apps.udi.storage import UDIStorage
 from apps.core.auth import _get_auth_headers
@@ -179,7 +181,7 @@ def _check_nonempty_live_fetch(entity: str, result: FetchResult, existing_count:
     return False
 
 
-class UDIManager:
+class UDIManager(ChannelMetadataMixin):
     """
     Universal Data Index Manager - Singleton class for all Dispatcharr data access.
     
@@ -224,6 +226,8 @@ class UDIManager:
         # Re-entrant because account-authority leases deliberately keep this
         # lock held while consumers may perform read-only UDI helper calls.
         self._lock = threading.RLock()
+        self._channel_reads = SingleFlight()
+        self._metadata_reads = SingleFlight()
         self._refresh_thread = None
         self._refresh_running = False       # controls background refresh loop thread
         self._init_in_progress = False      # re-entry guard for initialize()
@@ -351,8 +355,8 @@ class UDIManager:
 
     def _wait_for_initialization_completion(self, *, force_refresh: bool, timeout_seconds: int = 300) -> bool:
         """Wait for a concurrent initialization instead of reporting success early."""
-        deadline = time.time() + timeout_seconds
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
             with self._lock:
                 if not self._init_in_progress:
                     if force_refresh:
@@ -986,7 +990,7 @@ class UDIManager:
             logger.debug(f"Channel {channel_id} not in cache, fetching from API")
             try:
                 # Fetch channel from Dispatcharr API (returns channel dict or None)
-                channel = self.fetcher.fetch_channel_by_id(channel_id)
+                channel = self._fetch_channel_read(channel_id)
                 if channel:
                     # Add to caches under lock to ensure thread safety
                     with self._lock:
@@ -1771,8 +1775,7 @@ class UDIManager:
             result = self.fetcher.fetch_channels()
             channel_ids: Optional[Set[int]] = None
             try:
-                current_ids = self.fetcher.fetch_all_ids()
-                channel_ids = current_ids.get('channels') if isinstance(current_ids, dict) else None
+                channel_ids = self.fetcher.fetch_channel_ids()
             except Exception as exc:
                 logger.debug("Channel refresh could not fetch channel IDs oracle: %s", exc)
             channels, rehydrated_missing_count = self._rehydrate_missing_channel_ids(
@@ -1810,18 +1813,10 @@ class UDIManager:
         """
         logger.debug(f"Refreshing channel {channel_id}...")
         try:
-            channel = self.fetcher.fetch_channel_by_id(channel_id)
+            channel = self._fetch_channel_read(channel_id)
             if channel:
                 with self._lock:
-                    is_new = channel_id not in self._channels_by_id
-                    self._channels_by_id[channel_id] = channel
-                    if is_new:
-                        self._channels_cache.append(channel)
-                    else:
-                        for i, ch in enumerate(self._channels_cache):
-                            if ch.get('id') == channel_id:
-                                self._channels_cache[i] = channel
-                                break
+                    self._publish_channel(channel)
                 logger.debug(f"Channel {channel_id} refreshed successfully")
                 return True
             else:
@@ -2059,20 +2054,39 @@ class UDIManager:
             True if successful
         """
         with self._lock:
-            is_new = stream_id not in self._streams_by_id
-            self._streams_by_id[stream_id] = stream_data
-            if stream_data.get('url'):
-                self._streams_by_url[stream_data['url']] = stream_data
-            if is_new:
-                self._streams_cache.append(stream_data)
+            existing = self._streams_by_id.get(stream_id)
+            is_new = existing is None
+            incoming = dict(stream_data)
+            incoming['id'] = stream_id
+            previous_url = existing.get('url') if existing else None
+            previous_account = self._stream_account_id.get(stream_id)
+            account = self._get_stream_m3u_account_id(incoming)
+            if existing is None:
+                existing = incoming
+                self._streams_cache.append(existing)
                 self._valid_stream_ids.add(stream_id)
             else:
-                for i, st in enumerate(self._streams_cache):
-                    if st.get('id') == stream_id:
-                        self._streams_cache[i] = stream_data
-                        break
+                existing.clear()
+                existing.update(incoming)
+            self._streams_by_id[stream_id] = existing
+            if previous_url != existing.get('url') and self._streams_by_url.get(previous_url) is existing:
+                self._streams_by_url.pop(previous_url, None)
+            if existing.get('url'):
+                self._streams_by_url[existing['url']] = existing
+            if previous_account != account:
+                previous = self._streams_by_account_id.get(previous_account, [])
+                self._streams_by_account_id[previous_account] = [item for item in previous if item.get('id') != stream_id]
+                self._stream_account_id.pop(stream_id, None)
+            if account is not None:
+                self._stream_account_id[stream_id] = account
+                account_streams = self._streams_by_account_id.setdefault(account, [])
+                if is_new or previous_account != account:
+                    if not any(item.get('id') == stream_id for item in account_streams):
+                        account_streams.append(existing)
+            if is_new or previous_account != account:
+                self._has_custom_streams = any(self._get_stream_m3u_account_id(item) is None for item in self._streams_by_id.values())
             return True
-    
+
     def update_profile_channels(self, profile_id: int, profile_channels_data: Dict[str, Any]) -> bool:
         """Update profile channels data in the cache.
         

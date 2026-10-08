@@ -30,11 +30,15 @@ def test_stream_startup_buffer_config():
         # Check that stream_startup_buffer is in default config
         assert 'stream_startup_buffer' in config.config.get('stream_analysis', {}), \
             "stream_startup_buffer should be in default config"
+        assert 'bitrate_recheck_enabled' in config.config.get('stream_analysis', {}), \
+            "bitrate_recheck_enabled should be in default config"
         
         # Check default value
         default_buffer = config.config['stream_analysis']['stream_startup_buffer']
         assert default_buffer == 10, \
             f"Default stream_startup_buffer should be 10, got {default_buffer}"
+        assert config.config['stream_analysis']['bitrate_recheck_enabled'] is True, \
+            "Default bitrate_recheck_enabled should be True"
         
         print("✓ Stream startup buffer configuration test passed")
 

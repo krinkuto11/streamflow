@@ -50,6 +50,7 @@ class TestFPSOrdering(unittest.TestCase):
         
         session.streams = {101: s1, 102: s2}
         self.mock_session_manager.get_session.return_value = session
+        self.mock_session_manager.get_session_owner.return_value = session.session_id
         
         # Mock UDI to return current order (s1 is primary)
         self.mock_udi.get_channel_by_id.return_value = {'streams': [101, 102]}

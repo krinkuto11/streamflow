@@ -14,6 +14,7 @@ import {
   shouldRedirectForStartupGate,
 } from '@/lib/startup-gate-state.js'
 import { createSequentialPoller } from '@/lib/sequential-poller.js'
+import { getSetupCompleteFromReadiness } from '@/lib/setup-bootstrap.js'
 
 const Dashboard = lazy(() => import('@/pages/Dashboard'))
 const StreamChecker = lazy(() => import('@/pages/StreamChecker'))
@@ -54,9 +55,17 @@ function App() {
   const checkSetupStatus = async () => {
     try {
       setLoading(true)
-      const response = await api.get('/setup-wizard')
-      setSetupStatus(response.data)
+      // Readiness already reports configuration and startup state without a
+      // synchronous live Dispatcharr connection test on every page reload.
+      const response = await api.get('/readiness', {
+        validateStatus: status => status === 200 || status === 503,
+      })
+      setSetupStatus({
+        setup_complete: getSetupCompleteFromReadiness(response.data),
+        readiness: response.data,
+      })
     } catch (err) {
+      setSetupStatus(null)
       console.error('Failed to check setup status:', err)
       toast({
         title: "Connection Error",
@@ -87,11 +96,17 @@ function App() {
       return undefined
     }
 
+    // Apply the bootstrap response as the first polling result. A ready app
+    // needs no duplicate request; pending startup resumes after the interval.
+    let initialReadiness = setupStatus.readiness
     const poller = createSequentialPoller({
       intervalMs: 3000,
       poll: async (signal) => {
         try {
-          const response = await api.get('/readiness', { signal })
+          const response = initialReadiness
+            ? { data: initialReadiness }
+            : await api.get('/readiness', { signal })
+          initialReadiness = null
           if (signal.aborted) return false
 
           const data = response.data || {}
@@ -119,7 +134,7 @@ function App() {
     return () => {
       poller.stop()
     }
-  }, [setupComplete])
+  }, [setupComplete, setupStatus])
 
   useEffect(() => {
     if (shouldRedirectForStartupGate({
@@ -171,7 +186,7 @@ function App() {
   }
 
   return (
-    <div className="flex min-h-screen bg-background">
+    <div className="flex min-h-screen min-w-0 bg-background">
       <Sidebar
         isCollapsed={isCollapsed}
         setIsCollapsed={setIsCollapsed}
@@ -179,10 +194,10 @@ function App() {
       />
 
       <main className={cn(
-        "flex-1 p-6 transition-all duration-300 ease-in-out",
-        isCollapsed ? "lg:ml-20" : "lg:ml-64"
+        "min-w-0 flex-1 px-4 pb-24 pt-20 transition-all duration-300 ease-in-out sm:px-6 lg:px-8 lg:pb-8 lg:pt-8",
+        isCollapsed ? "lg:ml-20" : "lg:ml-56"
       )}>
-        <div className="max-w-7xl mx-auto pt-12 lg:pt-0">
+        <div className="mx-auto max-w-[1600px] min-w-0">
           {startupGateActive ? (
             <StreamFlowInitializingScreen
               initialization={udiInitialization || {

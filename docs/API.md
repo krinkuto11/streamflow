@@ -26,9 +26,19 @@ StreamFlow configuration files:
 - `DISPATCHARR_API_KEY_FILE` or `DISPATCHARR_API_KEY`
 - `DISPATCHARR_PASS_FILE` or `DISPATCHARR_PASS`
 - `SHADOW_WATCHER_API_KEY_FILE` or `SHADOW_WATCHER_API_KEY`
+- `OPENSTREAM_API_KEY_FILE` or `OPENSTREAM_API_KEY` (the key OpenStream monitoring
+  sessions send to OpenStream's `/api`; also settable in Settings → Connection)
 
 The `*_FILE` source takes precedence and fails closed if it cannot be read. API
 responses report only whether a secret is configured and never return its value.
+
+OpenStream monitoring configuration:
+
+- `GET /api/openstream/config`: `{has_api_key, api_key_managed_externally, test_url}`
+- `PUT /api/openstream/config`: `{api_key?, test_url?, clear_api_key?}`. An empty
+  `api_key` keeps the saved key.
+- `POST /api/openstream/test-connection`: `{test_url?, api_key?}`, which fall back to
+  the saved values. It reads OpenStream's `/api/fleet` with the key.
 
 ---
 

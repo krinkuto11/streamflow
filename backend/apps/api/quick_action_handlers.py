@@ -13,7 +13,43 @@ def discover_streams_response(*, get_automation_manager: Callable[[], Any]):
     """Handle manual stream discovery and assignment quick action."""
     try:
         manager = get_automation_manager()
-        assignments = manager.discover_and_assign_streams(force=True)
+        result = manager.discover_and_assign_streams(force=True)
+        if not isinstance(result, dict):
+            raise ValueError("Invalid stream discovery result")
+
+        aborted = result.get("aborted") is True
+        if aborted or result.get("success") is False or result.get("error"):
+            # Worker errors may contain provider URLs, credentials or internal
+            # paths. Keep diagnostics in the server log, never in API payloads.
+            logger.warning("Stream discovery did not complete: %s", result.get("error"))
+            return jsonify({
+                "success": False,
+                "aborted": aborted,
+                "partial_writes": result.get("partial_writes") is True,
+                "error": "Stream discovery was aborted" if aborted else "Stream discovery failed",
+                "code": "stream_discovery_aborted" if aborted else "stream_discovery_failed",
+            }), 409 if aborted else 500
+
+        # Current managers return a structured result; older callers return a
+        # channel-to-count mapping. Expose only the numeric assignment summary,
+        # excluding internal result details even on a successful discovery.
+        counts = result.get("assignment_count", result)
+        if not isinstance(counts, dict):
+            raise ValueError("Invalid stream assignment counts")
+        assignments = {}
+        for channel_id, count in counts.items():
+            if (
+                isinstance(channel_id, bool)
+                or not isinstance(channel_id, (int, str))
+                or isinstance(count, bool)
+                or not isinstance(count, int)
+                or count < 0
+            ):
+                raise ValueError("Invalid stream assignment counts")
+            normalized_channel_id = int(channel_id)
+            if normalized_channel_id <= 0:
+                raise ValueError("Invalid stream assignment channel ID")
+            assignments[str(normalized_channel_id)] = int(count)
         return jsonify(
             {
                 "message": "Stream discovery completed",
