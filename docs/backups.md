@@ -2,6 +2,15 @@
 
 Available on `dev`. Open **Backups** in the sidebar’s **System** section. A fresh installation also offers **Restore a backup** in the setup wizard, so a working Dispatcharr connection is not required to upload and restore a backup.
 
+<details>
+<summary>Backups page and restore confirmation (sample data)</summary>
+
+![Manual and automatic backup controls](screenshots/backups-page.png)
+
+![Verified backup confirmation](screenshots/backups-restore.png)
+
+</details>
+
 ## Contents
 
 Every archive includes a consistent SQLite snapshot and StreamFlow’s persisted JSON configuration files. This covers settings, Dispatcharr/OpenStream connections saved through the UI, automation profiles and periods, channel/group assignments, regex rules, provider filters/priorities, channel order, webhook configuration, Shadow Monitor and Teamarr Preflight configuration. The archive does not modify or back up Dispatcharr or Teamarr itself.
@@ -23,6 +32,8 @@ Archives contain stored connection credentials and may contain provider URLs. Do
 5. StreamFlow saves a **safety backup** of its current state, replaces the persisted state before opening database connections and restarts itself. The browser reconnects automatically. Restored automation settings retain their saved values and normal scheduled services may start again.
 
 An interrupted file replacement has a persistent recovery journal. On the next startup StreamFlow rolls back to its previous state before starting services. If rollback itself fails, startup stops and keeps the recovery journal rather than opening mixed state. Inspect the container log and storage before retrying. The last restore result is shown on the Backups page; safety archives can also be selected for restoration.
+
+For a fresh installation, configure the persistent data and backup folders in the container template, open **Restore a backup** in the setup wizard, upload the archive and follow the same verification/confirmation steps. After restart, the saved connections are used automatically. Adjust connection addresses if the new installation needs different endpoints. Existing legacy JSON migration files cannot overwrite the restored SQL settings or regex rules.
 
 Only backups written by this format are supported; arbitrary data-directory ZIP files are rejected. Backups from a newer unsupported database schema are rejected. Uploads are limited to 1 GiB compressed / 4 GiB expanded; configuration and monitoring JSON files are separately bounded.
 
