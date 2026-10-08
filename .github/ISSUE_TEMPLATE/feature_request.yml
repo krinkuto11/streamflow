@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest an enhancement to StreamFlow.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first. Explain the problem and a concrete use case so we can assess the proposal.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the limitation in the current behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: Give a practical example of who needs this and when.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the desired result and any settings or opt-in behavior you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Mention existing StreamFlow or Dispatcharr features and workarounds you have tried.
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Current StreamFlow version
+      description: If relevant, include the version or commit you evaluated.
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add examples or screenshots if useful. Remove credentials and private information.
+    validations:
+      required: false
