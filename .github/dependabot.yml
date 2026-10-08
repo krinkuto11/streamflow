@@ -21,15 +21,21 @@ updates:
       prefix: build
       include: scope
     groups:
+      # React's renderer and type packages must follow the same major version.
+      frontend-react:
+        applies-to: version-updates
+        patterns: ["react", "react-dom", "@types/react", "@types/react-dom"]
       frontend-runtime:
         applies-to: version-updates
         dependency-type: production
         patterns: ["*"]
+        exclude-patterns: ["react", "react-dom"]
         update-types: [minor, patch]
       frontend-tooling:
         applies-to: version-updates
         dependency-type: development
         patterns: ["*"]
+        exclude-patterns: ["@types/react", "@types/react-dom"]
         update-types: [minor, patch]
 
   - package-ecosystem: github-actions
