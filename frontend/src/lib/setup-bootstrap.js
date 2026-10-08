@@ -4,6 +4,9 @@ export function getSetupCompleteFromReadiness(data) {
   if (!data || typeof data !== 'object' || typeof data.ready !== 'boolean') {
     throw new Error('Invalid startup readiness response')
   }
+  // Restore review deliberately avoids initializing or testing the saved
+  // connection. Its dedicated Backups screen must remain reachable.
+  if (data.restore_review_pending === true && data.setup_complete === true) return true
 
   const config = data.checks?.dispatcharr_config
   if (config !== undefined) {

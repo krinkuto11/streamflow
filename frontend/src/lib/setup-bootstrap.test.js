@@ -3,6 +3,10 @@ import { getSetupCompleteFromReadiness } from './setup-bootstrap.js'
 import { getInitializationStateFromStatus, isStartupGateActive } from './startup-gate-state.js'
 
 describe('application setup from readiness', () => {
+  it('opens restore review without requiring a configured destination', () => {
+    expect(getSetupCompleteFromReadiness({ ready: false, setup_complete: true, restore_review_pending: true })).toBe(true)
+    expect(() => getSetupCompleteFromReadiness({ ready: false, setup_complete: true })).toThrow()
+  })
   it('accepts an operational application without a connection diagnostic', () => {
     expect(getSetupCompleteFromReadiness({ ready: true })).toBe(true)
     expect(getSetupCompleteFromReadiness({
