@@ -42,6 +42,11 @@ Each channel can have multiple regex patterns. Patterns are stored in `channel_r
 - Literal spaces in patterns are converted to `\s+` automatically — flexible whitespace matching
 - If `match_by_tvg_id` is enabled, **catch-all patterns** (`.*`, `^.*$`, `.+`, `^.+$`) are ignored to prevent unintended mass-matching
 
+Monitoring sessions combine a channel's patterns into an OR filter. Leading
+Python flags such as `(?i)` or `(?m)` apply only to their own alternative when
+combined, so one pattern cannot change another pattern's flag settings. Stored
+patterns and the regular provider-aware matching rules are not rewritten.
+
 ### `CHANNEL_NAME` variable
 
 Use `CHANNEL_NAME` in a pattern to substitute the channel's actual name at match time:
