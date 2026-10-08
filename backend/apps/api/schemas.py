@@ -44,6 +44,59 @@ class BackupRestoreRequest:
         return cls(confirm=True)
 
 
+@dataclass
+class BackupReviewConfirmRequest:
+    token: str
+    mappings: Dict[str, Any]
+
+    @classmethod
+    def from_payload(cls, payload):
+        import re
+        from apps.backups.inventory import KINDS
+        if not isinstance(payload, dict) or set(payload) != {'confirm','token','mappings'} or payload['confirm'] is not True:
+            raise ValidationError('Explicit assignment confirmation is required')
+        token = payload['token']
+        mappings = payload['mappings']
+        if not isinstance(token, str) or not re.fullmatch('[a-f0-9]{64}', token):
+            raise ValidationError('Invalid comparison token')
+        if not isinstance(mappings, dict) or set(mappings) != set(KINDS[:-1]):
+            raise ValidationError('Invalid restore mappings')
+        for values in mappings.values():
+            if not isinstance(values, dict) or len(values) > 200000:
+                raise ValidationError('Invalid restore mapping entries')
+            for source, target in values.items():
+                if not isinstance(source, str) or not source.isdecimal() or int(source) < 1 or (target is not None and (type(target) is not int or target < 1)):
+                    raise ValidationError('Mappings must use positive identifiers or an explicit null skip')
+        return cls(token=token, mappings=mappings)
+
+
+@dataclass
+class BackupReviewConnectionRequest:
+    settings: Dict[str, Any]
+
+    @classmethod
+    def from_payload(cls, payload):
+        from urllib.parse import urlsplit
+        fields = {'base_url','auth_mode','username','password','api_key'}
+        if not isinstance(payload, dict) or not payload or set(payload) - fields:
+            raise ValidationError('Invalid target connection settings')
+        settings = {}
+        for key, value in payload.items():
+            if not isinstance(value, str) or len(value) > 4096:
+                raise ValidationError('Invalid target connection value')
+            if key in ('api_key','password') and not value:
+                continue  # Blank retains the stored credential.
+            settings[key] = value
+        if 'auth_mode' in settings and settings['auth_mode'] not in ('credentials','api_key'):
+            raise ValidationError('Invalid authentication mode')
+        if 'base_url' in settings:
+            url = urlsplit(settings['base_url'])
+            if url.scheme not in ('http','https') or not url.hostname or url.username or url.password or url.query or url.fragment:
+                raise ValidationError('Provide a valid HTTP(S) Dispatcharr address without credentials')
+            settings['base_url'] = settings['base_url'].rstrip('/')
+        return cls(settings=settings)
+
+
 def _ensure_dict(payload: Any, *, message: str) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValidationError(message)

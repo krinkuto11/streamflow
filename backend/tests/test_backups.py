@@ -188,7 +188,8 @@ def test_restore_round_trip_replaces_json_recovery_copies_and_creates_safety(per
     restore.stage_restore(persistent,path)
     result = restore.apply_pending_restore(persistent)
     assert result['status']=='restored'
-    assert [row for row in rows(persistent/'streamflow.db','system_settings') if row[0]!='backup_restore_sql_authoritative'] == before
+    assert [row for row in rows(persistent/'streamflow.db','system_settings') if row[0] not in ('backup_restore_sql_authoritative','backup_restore_review_pending')] == before
+    assert dict(rows(persistent/'streamflow.db','system_settings'))['backup_restore_review_pending'] == 'true'
     with closing(sqlite3.connect(persistent/'streamflow.db')) as db:
         assert db.execute('SELECT pid FROM monitoring_sessions').fetchone()[0] is None
         assert json.loads(db.execute('SELECT raw_info FROM monitoring_sessions').fetchone()[0])['is_active'] is False

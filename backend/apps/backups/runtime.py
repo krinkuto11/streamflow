@@ -63,6 +63,10 @@ def configure_runtime(service, *, automation_provider, stop_processors):
         # The safety archive is created offline after exec. Preserve its optional
         # in-memory timeline before replacing this process.
         atomic_write_json(service.config_dir / 'monitoring_history.json', capture_monitoring_history(), backup=False)
+        if not service.review_pending():
+            inventory = service.capture_inventory()
+            if inventory is not None:
+                atomic_write_json(service.config_dir / 'restore_inventory.json', inventory, backup=False)
 
     def restart():
         time.sleep(1)  # Allow the accepted response to reach the browser.

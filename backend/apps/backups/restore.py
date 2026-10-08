@@ -116,6 +116,7 @@ def apply_pending_restore(config_dir, backup_dir=None):
             history_path = root / 'monitoring_history.json'
             version_file = Path(__file__).resolve().parents[2] / 'version.txt'
             safety = create_archive(root, backup_dir, kind='safety',
+                                    inventory=read_json(root / 'restore_inventory.json') if (root / 'restore_inventory.json').is_file() else None,
                                     version=version_file.read_text().strip() if version_file.is_file() else 'unknown',
                                     monitoring_history=read_json(history_path) if history_path.is_file() else None)
             result['safety_backup'] = safety['name']
@@ -127,7 +128,7 @@ def apply_pending_restore(config_dir, backup_dir=None):
             rollback.mkdir()
             originals = {p.name: p for p in config_files(root)}
             # Preserve the offline monitoring snapshot and JSON recovery copies as well.
-            for path in [root / 'monitoring_history.json', *root.glob('*.json.last-good')]:
+            for path in [root / 'monitoring_history.json', root / 'restore_inventory.json', *root.glob('*.json.last-good')]:
                 if path.is_file() and not path.is_symlink():
                     originals[path.name] = path
             # The backup can be created during live monitoring. Restore its data,
@@ -143,6 +144,11 @@ def apply_pending_restore(config_dir, backup_dir=None):
                 # SQL is authoritative in this archive. Older compatibility JSON
                 # must not overwrite restored regex rules or connection settings.
                 db.execute("INSERT OR REPLACE INTO system_settings (key,value) VALUES ('backup_restore_sql_authoritative','true')")
+                # Every imported archive enters review. Only a server-created
+                # confirmation journal can release the pause; archive settings
+                # can never bypass it.
+                from apps.backups.inventory import REVIEW_KEY
+                db.execute('INSERT OR REPLACE INTO system_settings VALUES (?,?)', (REVIEW_KEY, json.dumps(journal.get('review_approved') is not True)))
                 db.commit()
             new_files = {'streamflow.db': restored_db}
             for path in (incoming / 'config').glob('*.json'):
@@ -150,7 +156,9 @@ def apply_pending_restore(config_dir, backup_dir=None):
                 new_files[path.name + '.last-good'] = path
             if (incoming / 'monitoring-history.json').exists():
                 new_files['monitoring_history.json'] = incoming / 'monitoring-history.json'
-            targets = sorted({'streamflow.db', 'monitoring_history.json', *originals, *new_files})
+            if (incoming / 'dispatcharr-inventory.json').exists():
+                new_files['restore_inventory.json'] = incoming / 'dispatcharr-inventory.json'
+            targets = sorted({'streamflow.db', 'monitoring_history.json', 'restore_inventory.json', *originals, *new_files})
             for name in targets:
                 _safe_file(root, name)
             for name, source in originals.items():

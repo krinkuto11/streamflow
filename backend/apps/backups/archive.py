@@ -23,7 +23,7 @@ MAX_EXTRACTED_BYTES = 4 * 1024 ** 3
 MAX_JSON_BYTES = 64 * 1024 ** 2
 NAME_RE = re.compile(r'streamflow-(backup|safety|import)-[A-Za-z0-9_-]+\.zip\Z')
 JSON_NAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]*\.json\Z')
-EXCLUDED_JSON = {'udi_data.json', 'monitoring_history.json'}
+EXCLUDED_JSON = {'udi_data.json', 'monitoring_history.json', 'restore_inventory.json'}
 HISTORY_TABLES = ('channel_health', 'stream_telemetry', 'runs', 'playback_observations')
 SUMMARY_TABLES = {
     'settings': 'system_settings', 'profiles': 'automation_profiles',
@@ -133,7 +133,7 @@ def sync_directory(path):
 
 
 def create_archive(config_dir, backup_dir, *, include_history=True, monitoring_history=None,
-                   version='unknown', kind='backup'):
+                   inventory=None, version='unknown', kind='backup'):
     config_dir, backup_dir = Path(config_dir).resolve(), Path(backup_dir).resolve()
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc)
@@ -166,6 +166,12 @@ def create_archive(config_dir, backup_dir, *, include_history=True, monitoring_h
                 path = stage / 'config' / filename
                 path.parent.mkdir(exist_ok=True)
                 path.write_bytes(content)
+            if inventory is not None:
+                from apps.backups.inventory import validate_inventory
+                validate_inventory(inventory)
+                (stage / 'dispatcharr-inventory.json').write_text(json.dumps(inventory, allow_nan=False), encoding='utf-8')
+                if (stage / 'dispatcharr-inventory.json').stat().st_size > MAX_JSON_BYTES:
+                    raise ValueError('Dispatcharr inventory exceeds the backup size limit')
             if include_history and monitoring_history is not None:
                 from apps.backups.history import validate_history
                 validate_history(monitoring_history)
@@ -226,7 +232,7 @@ def extract_validated(path, destination):
         raise ValueError('Archive exceeds the backup size limit')
     metadata = manifest_metadata(path)
     files = metadata.get('files')
-    if not isinstance(files, dict) or 'streamflow.db' not in files or len(files) > 128:
+    if not isinstance(files, dict) or 'streamflow.db' not in files or len(files) > 129:
         raise ValueError('Invalid backup file list')
     if not metadata['include_history'] and 'monitoring-history.json' in files:
         raise ValueError('Configuration-only backup contains monitoring history')
@@ -238,7 +244,7 @@ def extract_validated(path, destination):
         if sum(entry.file_size for entry in entries) > MAX_EXTRACTED_BYTES:
             raise ValueError('Expanded archive exceeds the backup size limit')
         for relative, expected in files.items():
-            allowed = relative in {'streamflow.db', 'monitoring-history.json'} or (
+            allowed = relative in {'streamflow.db', 'monitoring-history.json', 'dispatcharr-inventory.json'} or (
                 relative.startswith('config/') and JSON_NAME_RE.fullmatch(relative[7:])
                 and relative[7:] not in EXCLUDED_JSON)
             if not allowed or not isinstance(expected, dict):
@@ -260,6 +266,9 @@ def extract_validated(path, destination):
                 if relative == 'monitoring-history.json':
                     from apps.backups.history import validate_history
                     validate_history(content)
+                elif relative == 'dispatcharr-inventory.json':
+                    from apps.backups.inventory import validate_inventory
+                    validate_inventory(content)
         schema, counts = database_summary(destination / 'streamflow.db')
         if schema != metadata.get('schema_version'):
             raise ValueError('Backup schema check failed')

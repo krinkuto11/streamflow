@@ -350,6 +350,16 @@ def _backup_maintenance_gate():
     if service is not None and service.maintenance and request.path.startswith('/api/') and request.path != '/api/backups':
         from apps.core.api_responses import error_response
         return error_response('A restore is preparing to restart StreamFlow', status_code=503, code='restore_in_progress')
+    if request.path.startswith('/api/') and get_backup_service().review_pending():
+        if request.path in ('/api/readiness', '/api/v1/readiness'):
+            return jsonify({'ready': False, 'setup_complete': True, 'restore_review_pending': True,
+                            'initialization': {'status': 'completed', 'percentage': 100,
+                                               'message': 'Review restored Dispatcharr assignments in Backups'}}), 503
+        if not (request.path.startswith('/api/backups') or request.path in (
+                '/api/version', '/api/environment', '/api/health', '/api/v1/health')):
+            from apps.core.api_responses import error_response
+            return error_response('Review restored Dispatcharr assignments in Backups before using StreamFlow',
+                                  status_code=409, code='restore_review_required')
 
 
 @app.before_request
@@ -505,6 +515,8 @@ def check_wizard_complete():
     using the system even if they haven't configured any channel patterns yet.
     """
     try:
+        if get_backup_service().review_pending():
+            return False
         config_dir = Path(CONFIG_DIR)
         automation_file = config_dir / 'automation_config.json'
         regex_file = config_dir / 'channel_regex_config.json'
@@ -2807,9 +2819,10 @@ if __name__ == '__main__':
             logger.error(f"Failed to auto-start UDI refresh processor: {e}")
         
         try:
-            monitoring_service = get_monitoring_service()
-            monitoring_service.start()
-            logger.info("Stream monitoring service auto-started")
+            if not backup_service.review_pending():
+                monitoring_service = get_monitoring_service()
+                monitoring_service.start()
+                logger.info("Stream monitoring service auto-started")
         except Exception as e:
             logger.error(f"Failed to auto-start stream monitoring service: {e}")
 

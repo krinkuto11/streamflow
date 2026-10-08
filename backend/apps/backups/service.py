@@ -25,11 +25,15 @@ class BackupBusyError(ValueError):
 
 class BackupService:
     def __init__(self, *, config_dir, db, backup_dir=None, clock=time.time,
-                 capture_history=None, busy_reasons=None, stop_runtime=None, restart=None):
+                 capture_history=None, capture_inventory=None, fetch_inventory=None,
+                 busy_reasons=None, stop_runtime=None, restart=None):
         self.config_dir = Path(config_dir).resolve()
         self.backup_dir = Path(backup_dir or os.environ.get('BACKUP_DIR', str(self.config_dir / 'backups'))).resolve()
         self.db, self.clock = db, clock
         self.capture_history = capture_history or (lambda: {'format_version': 1, 'sessions': []})
+        self.capture_inventory = capture_inventory or (lambda: None)
+        from apps.backups.inventory import fetch_inventory as fetch_current
+        self.fetch_inventory = fetch_inventory or fetch_current
         self.busy_reasons = busy_reasons or (lambda: [])
         self.stop_runtime, self.restart = stop_runtime, restart
         self._lock = threading.RLock()
@@ -38,6 +42,24 @@ class BackupService:
         self._thread = None
         self.maintenance = False
         self.operation = {'state': 'idle'}
+        self._review_report = None
+        self._review_pending = None
+
+    def review_pending(self):
+        from apps.backups.review_workflow import pending
+        return pending(self)
+
+    def check_review(self):
+        from apps.backups.review_workflow import check
+        return check(self)
+
+    def confirm_review(self, token, mappings):
+        from apps.backups.review_workflow import confirm
+        return confirm(self, token, mappings)
+
+    def update_review_connection(self, settings):
+        from apps.backups.review_workflow import update_connection
+        return update_connection(self, settings)
 
     def get_config(self):
         return validate_config(self.db.get_system_setting('backup_config', {}) or {})
@@ -86,11 +108,12 @@ class BackupService:
         return result
 
     def get_status(self):
+        from apps.backups.review_workflow import public_status
         with self._lock:
             result = {'config': self.get_config(), 'directory': str(self.backup_dir),
                       'operation': dict(self.operation), 'restart_supported': self.restart is not None,
                       'schedule': self.db.get_system_setting('backup_schedule_state', {}) or {},
-                      'backups': self.list_backups()}
+                      'backups': self.list_backups(), 'restore_review': public_status(self)}
             if (self.config_dir / RESULT).is_file():
                 result['restore_result'] = read_json(self.config_dir / RESULT)
             return result
@@ -103,11 +126,12 @@ class BackupService:
             path.unlink()
 
     def _create(self, include_history):
+        from apps.backups.review_workflow import saved_inventory
         history = self.capture_history() if include_history else None
         version_file = Path(__file__).resolve().parents[2] / 'version.txt'
         version = version_file.read_text().strip() if version_file.is_file() else 'unknown'
         metadata = create_archive(self.config_dir, self.backup_dir, include_history=include_history,
-                                  monitoring_history=history, version=version)
+                                  monitoring_history=history, inventory=saved_inventory(self), version=version)
         self._prune(self.get_config()['retention'])
         return self._public(self.backup_dir / metadata['name'], metadata)
 
@@ -124,10 +148,10 @@ class BackupService:
                     result = action()
                     with self._lock:
                         self.operation.update(state='completed', result=result)
-                except Exception:
+                except Exception as exc:
                     logger.exception('Backup operation failed (%s)', kind)
                     with self._lock:
-                        self.operation.update(state='failed', error='Backup operation failed. Check storage permissions, available space and the server log.')
+                        self.operation.update(state='failed', error=str(exc) if isinstance(exc, ValueError) else 'Backup operation failed. Check storage permissions, available space and the server log.')
                 finally:
                     with self._lock:
                         self.operation['finished_at'] = self.clock()
@@ -191,32 +215,35 @@ class BackupService:
         def action():
             path = archive_path(self.backup_dir, name)
             stage_restore(self.config_dir, path)
-            try:
-                if self.stop_runtime:
-                    self.stop_runtime()
-                if self.busy_reasons():
-                    raise BackupBusyError('Work started while preparing the restore')
-            except Exception:
-                journal = read_json(self.config_dir / PENDING)
-                (self.config_dir / PENDING).unlink()
-                shutil.rmtree(_stage_path(self.config_dir, journal['stage']))
-                atomic_write_json(self.config_dir / RESULT, {'status': 'failed',
-                                  'message': 'Restore cancelled; previous configuration retained',
-                                  'finished_at': datetime.now(timezone.utc).isoformat()}, backup=False)
-                self.restart()  # Resume the previous services without a pending restore.
-                raise
-            with self._lock:
-                self.operation['state'] = 'restarting'
-            # The restart callback executes only after the HTTP response has been sent.
-            try:
-                self.restart()
-            except Exception:
-                journal = read_json(self.config_dir / PENDING)
-                (self.config_dir / PENDING).unlink()
-                shutil.rmtree(_stage_path(self.config_dir, journal['stage']))
-                raise
+            self._restart_staged()
             return {'restart_required': True}
         return self._start_job('restore', action)
+
+    def _restart_staged(self):
+        try:
+            if self.stop_runtime:
+                self.stop_runtime()
+            if self.busy_reasons():
+                raise BackupBusyError('Work started while preparing the restore')
+        except Exception:
+            journal = read_json(self.config_dir / PENDING)
+            (self.config_dir / PENDING).unlink()
+            shutil.rmtree(_stage_path(self.config_dir, journal['stage']))
+            atomic_write_json(self.config_dir / RESULT, {'status': 'failed',
+                              'message': 'Restore cancelled; previous configuration retained',
+                              'finished_at': datetime.now(timezone.utc).isoformat()}, backup=False)
+            self.restart()  # Resume the previous services without a pending restore.
+            raise
+        with self._lock:
+            self.operation['state'] = 'restarting'
+        # The restart callback executes only after the HTTP response has been sent.
+        try:
+            self.restart()
+        except Exception:
+            journal = read_json(self.config_dir / PENDING)
+            (self.config_dir / PENDING).unlink()
+            shutil.rmtree(_stage_path(self.config_dir, journal['stage']))
+            raise
 
     def tick(self):
         with self._lock:
@@ -283,6 +310,7 @@ def get_backup_service():
             from apps.database.connection import CONFIG_DIR
             from apps.database.manager import get_db_manager
             from apps.backups.history import capture_monitoring_history
+            from apps.backups.inventory import capture_inventory
             _service = BackupService(config_dir=CONFIG_DIR, db=get_db_manager(),
-                                     capture_history=capture_monitoring_history)
+                                     capture_history=capture_monitoring_history, capture_inventory=capture_inventory)
         return _service

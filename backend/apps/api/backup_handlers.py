@@ -9,7 +9,8 @@ from urllib.parse import urlsplit
 from flask import Blueprint, request, send_file
 from werkzeug.exceptions import RequestEntityTooLarge
 
-from apps.api.schemas import BackupConfigRequest, BackupCreateRequest, BackupRestoreRequest
+from apps.api.schemas import (BackupConfigRequest, BackupCreateRequest, BackupRestoreRequest,
+                             BackupReviewConfirmRequest, BackupReviewConnectionRequest)
 from apps.backups.archive import MAX_ARCHIVE_BYTES, archive_path
 from apps.backups.service import BackupBusyError
 from apps.core.api_responses import error_response, success_response
@@ -72,6 +73,23 @@ def create_backup_blueprint(service_provider):
         if 'file' not in request.files:
             raise ValueError('Choose a StreamFlow backup ZIP file')
         return success_response(service_provider().import_backup(request.files['file'].stream), status_code=201)
+
+    @blueprint.post('/review/check')
+    @handled
+    def compare():
+        return success_response(service_provider().check_review(), status_code=202)
+
+    @blueprint.put('/review/connection')
+    @handled
+    def connection():
+        payload = BackupReviewConnectionRequest.from_payload(request.get_json(silent=True))
+        return success_response(service_provider().update_review_connection(payload.settings))
+
+    @blueprint.post('/review/confirm')
+    @handled
+    def confirm():
+        payload = BackupReviewConfirmRequest.from_payload(request.get_json(silent=True))
+        return success_response(service_provider().confirm_review(payload.token, payload.mappings), status_code=202)
 
     @blueprint.get('/<name>/inspect')
     @handled

@@ -45,6 +45,7 @@ function App() {
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [udiInitialization, setUdiInitialization] = useState(null)
   const [udiInitializationChecked, setUdiInitializationChecked] = useState(false)
+  const [restoreReviewPending, setRestoreReviewPending] = useState(false)
   const { toast } = useToast()
   const navigate = useNavigate()
   const location = useLocation()
@@ -65,6 +66,7 @@ function App() {
         setup_complete: getSetupCompleteFromReadiness(response.data),
         readiness: response.data,
       })
+      setRestoreReviewPending(response.data?.restore_review_pending === true)
     } catch (err) {
       setSetupStatus(null)
       console.error('Failed to check setup status:', err)
@@ -111,6 +113,7 @@ function App() {
           if (signal.aborted) return false
 
           const data = response.data || {}
+          setRestoreReviewPending(data.restore_review_pending === true)
           setUdiInitialization(getInitializationStateFromStatus(data))
           setUdiInitializationChecked(true)
           return data.ready !== true
@@ -118,6 +121,7 @@ function App() {
           if (signal.aborted) return false
           const readiness = err?.response?.data
           if (readiness && typeof readiness.ready === 'boolean') {
+            setRestoreReviewPending(readiness.restore_review_pending === true)
             setUdiInitialization(getInitializationStateFromStatus(readiness))
             setUdiInitializationChecked(true)
             return readiness.ready !== true
@@ -159,6 +163,10 @@ function App() {
     )
   }
 
+  if (restoreReviewPending && location.pathname !== '/backups') {
+    return <Navigate to="/backups" replace />
+  }
+
   if (!setupComplete && setupStatus && location.pathname !== '/backups') {
     return (
       <Suspense fallback={<PageLoading />}>
@@ -191,7 +199,7 @@ function App() {
       <Sidebar
         isCollapsed={isCollapsed}
         setIsCollapsed={setIsCollapsed}
-        navigationDisabled={startupGateActive}
+        navigationDisabled={startupGateActive || restoreReviewPending}
       />
 
       <main className={cn(
