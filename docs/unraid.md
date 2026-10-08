@@ -26,12 +26,9 @@ one with a different `my-` filename.
 6. Complete StreamFlow's setup wizard with the reachable Dispatcharr address and
    your credentials. `localhost` inside this bridge-network container refers to
    StreamFlow itself.
-7. After the first setup, use **Docker -> StreamFlow -> Restart** once. In the
-   current stable image, the EPG, scheduled-event and UDI refresh workers start
-   on process startup when a saved Dispatcharr connection exists. Wait for
-   startup to complete before scheduling work. This first-setup behavior is
-   tracked in [issue #495](https://github.com/krinkuto11/streamflow/issues/495);
-   no PC or Unraid host restart is needed.
+7. Wait for initial synchronization and startup to complete before scheduling
+   work. Starting with StreamFlow 2.7.1, the required background workers start
+   after successful setup without a container or host restart.
 
 The `/app/data` mapping persists the database, configuration, regex rules and
 playback history across container recreation. Keep this mapping when updating.

@@ -9,7 +9,7 @@
 - Document manual DockerMan installation, normal updates and the Community Applications submission workflow.
 - Document optional NVIDIA and DRI/VAAPI setup through DockerMan, including device permissions, the exact Stream Checker controls, CPU fallback and return to CPU mode.
 - Add a cropped 40 KB screenshot of the real hardware settings, without connection or provider data.
-- Document the current one-time container restart after fresh setup and link the follow-up bug in issue #495.
+- Document automatic required-worker startup after first setup in StreamFlow 2.7.1.
 - Keep Community Applications availability marked as pending until the listing is published.
 
 ## Validation
@@ -18,7 +18,8 @@
 - Existing public icon and example screenshot URLs were reachable. The template and guide canonical URLs refer to `main` and will become available there after merge.
 - Installed the stable image with empty Appdata on the real Unraid host using its official DockerMan `update_container` script, an isolated user template, a separate data directory and an alternate host port.
 - Verified that DockerMan discovers the user template, parses the editable fields and resolves the WebUI to the configured host port using its actual PHP implementation. An interactive authenticated Unraid GUI session was unavailable; application browser tests and DockerMan parser checks were performed separately.
-- Completed the real StreamFlow setup wizard with an existing Dispatcharr connection, reached the dashboard and observed no browser JavaScript errors. Initial cache loading completed; the three required background workers needed the documented container restart on the current stable image.
+- Completed the real StreamFlow 2.7.0 setup wizard with an existing Dispatcharr connection, reached the dashboard and observed no browser JavaScript errors. Initial cache loading completed; this first test exposed the required-worker startup gap tracked in #495.
+- The separate fix in #496 was verified on a fresh DockerMan installation: failed initialization did not start workers, successful setup reached readiness in the original process, and concurrent saves retained one worker per service. The guide describes the corrected 2.7.1 flow.
 - After that restart, readiness passed, the Dispatcharr connection remained valid and stored settings matched their pre-restart signature.
 - A normal DockerMan update recreated the container while preserving the image selection, environment, port and data mapping; readiness and stored settings passed again afterward.
 - Verified the non-root runtime (`99:100`), SQLite integrity, persistent database location and a CPU FFmpeg probe.
