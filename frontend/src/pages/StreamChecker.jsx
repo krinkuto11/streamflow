@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
@@ -12,12 +12,16 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.j
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from '@/components/ui/pagination.jsx'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
+import { useVisiblePolling } from '@/hooks/use-visible-polling.js'
+import { StreamCountdown } from '@/components/StreamCountdown.jsx'
+import { VirtualStreamRows } from '@/components/VirtualStreamRows.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
 import { getExternalStaleDiagnosticsDisplay } from '@/lib/external-stale-diagnostics-display.js'
 import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
 import { getCurrentProgressDisplay } from '@/lib/stream-checker-progress-display.js'
+import { loadStreamCheckerPoll } from '@/lib/stream-checker-poll.js'
 import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote, getHardwareRuntimeDeviceLabel } from '@/lib/hardware-status-display.js'
 import {
   getParallelProgressBadgeText,
@@ -59,7 +63,6 @@ export default function StreamChecker() {
   const [hardwareStatus, setHardwareStatus] = useState(null)
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
-  const [tick, setTick] = useState(0) // drives countdown re-renders — value never rendered
   const [configEditing, setConfigEditing] = useState(false)
   const [editedConfig, setEditedConfig] = useState(null)
   const [deadStreams, setDeadStreams] = useState([])
@@ -76,59 +79,51 @@ export default function StreamChecker() {
   const [queueStartMode, setQueueStartMode] = useState('first')
   const [queueStartChannelId, setQueueStartChannelId] = useState('')
   const [queueStartInitialized, setQueueStartInitialized] = useState(false)
+  const activeCheckRef = useRef(false)
   const { toast } = useToast()
 
-  useEffect(() => {
-    loadData()
-    // Poll for updates - use shorter interval when checking is active
-    const pollInterval = (
-      status?.stream_checking_mode ||
-      status?.checking ||
-      (status?.queue?.queue_size > 0) ||
-      (status?.queue?.in_progress > 0)
-    ) ? 1000 : 3000
-    const interval = setInterval(() => {
-      loadData()
-    }, pollInterval)
-    return () => clearInterval(interval)
-  }, [status?.stream_checking_mode, status?.checking, status?.queue?.queue_size, status?.queue?.in_progress])
+  const initialPollLoaded = useRef(false)
+  useVisiblePolling(async signal => {
+    await loadData(!initialPollLoaded.current, signal)
+    if (!signal.aborted) initialPollLoaded.current = true
+  }, () => activeCheckRef.current ? 1000 : 5000)
 
   useEffect(() => {
     loadStartChannels()
   }, [])
 
-  // Tick every second to drive per-stream countdown cells
-  // The tick value itself is never rendered — it triggers re-renders so
-  // each countdown cell recalculates from Date.now() fresh each second.
-  useEffect(() => {
-    const timer = setInterval(() => setTick(t => t + 1), 1000)
-    return () => clearInterval(timer)
-  }, [])
-
-  const loadData = async () => {
+  const loadData = async (includeSettings = true, signal) => {
     try {
-      const [statusResponse, progressResponse, configResponse, hardwareStatusResponse] = await Promise.all([
-        streamCheckerAPI.getStatus(),
-        streamCheckerAPI.getProgress(),
-        streamCheckerAPI.getConfig(),
-        streamCheckerAPI.getHardwareStatus()
-      ])
-      setStatus(statusResponse.data)
-      setProgress(progressResponse.data)
-      setConfig(configResponse.data)
-      setHardwareStatus(hardwareStatusResponse.data)
-      if (!editedConfig && configResponse.data) {
-        setEditedConfig(configResponse.data)
+      const { statusResult, progressResult, configResult, hardwareResult } =
+        await loadStreamCheckerPoll(streamCheckerAPI, includeSettings, signal ? { signal } : undefined)
+      if (signal?.aborted) return
+      if (statusResult.status === 'fulfilled') {
+        const latestStatus = statusResult.value.data
+        setStatus(latestStatus)
+        activeCheckRef.current = Boolean(
+          latestStatus?.stream_checking_mode || latestStatus?.checking
+          || latestStatus?.queue?.queue_size > 0 || latestStatus?.queue?.in_progress > 0
+        )
       }
-      if (!queueStartInitialized && configResponse.data?.queue) {
-        const savedMode = configResponse.data.queue.start_mode || 'first'
-        const savedChannelId = configResponse.data.queue.start_channel_id
+      if (progressResult.status === 'fulfilled') setProgress(progressResult.value.data)
+      if (configResult?.status === 'fulfilled') {
+        const nextConfig = configResult.value.data
+        setConfig(nextConfig)
+        setEditedConfig(previous => previous ?? nextConfig)
+      }
+      if (hardwareResult?.status === 'fulfilled') setHardwareStatus(hardwareResult.value.data)
+      if (!queueStartInitialized && configResult?.status === 'fulfilled' && configResult.value.data?.queue) {
+        const savedMode = configResult.value.data.queue.start_mode || 'first'
+        const savedChannelId = configResult.value.data.queue.start_channel_id
         setQueueStartMode(savedMode)
         if (savedChannelId !== null && savedChannelId !== undefined) {
           setQueueStartChannelId(String(savedChannelId))
         }
         setQueueStartInitialized(true)
       }
+      const failed = [statusResult, progressResult, configResult, hardwareResult]
+        .filter(result => result?.status === 'rejected')
+      if (failed.length > 0) console.warn('Stream checker data partially unavailable:', failed.map(result => result.reason))
     } catch (err) {
       console.error('Failed to load stream checker data:', err)
     } finally {
@@ -588,8 +583,8 @@ export default function StreamChecker() {
           <div className="flex min-w-0 items-start gap-2">
             <Info className="mt-0.5 h-4 w-4 flex-none text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="min-w-0 max-w-full break-words font-medium text-foreground">{staleNoticeTitle}</p>
-              <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">
+              <p className="min-w-0 max-w-full wrap-break-word font-medium text-foreground">{staleNoticeTitle}</p>
+              <p className="min-w-0 max-w-full whitespace-normal wrap-anywhere">
                 {staleNoticeText}
                 {Number.isFinite(Number(progressStaleAge)) && (
                   <span className="ml-1">Last update age: {formatDuration(Number(progressStaleAge))}.</span>
@@ -608,15 +603,15 @@ export default function StreamChecker() {
           <div className="flex min-w-0 items-start gap-2">
             <Info className="mt-0.5 h-3.5 w-3.5 flex-none text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">
+              <p className="min-w-0 max-w-full whitespace-normal wrap-anywhere">
                 <span className="font-medium text-foreground">{externalStaleDisplay.title}.</span>{' '}
                 {externalStaleDisplay.text}
               </p>
               {externalStaleDisplay.detail && (
-                <p className="min-w-0 max-w-full whitespace-normal text-xs [overflow-wrap:anywhere]">{externalStaleDisplay.detail}</p>
+                <p className="min-w-0 max-w-full whitespace-normal text-xs wrap-anywhere">{externalStaleDisplay.detail}</p>
               )}
               {externalStaleDisplay.accounts.length > 0 && (
-                <p className="min-w-0 max-w-full whitespace-normal text-xs [overflow-wrap:anywhere]">
+                <p className="min-w-0 max-w-full whitespace-normal text-xs wrap-anywhere">
                   {externalStaleDisplay.accounts.join(' | ')}
                 </p>
               )}
@@ -771,7 +766,7 @@ export default function StreamChecker() {
                                 {profileSlots.slice(0, 5).map((slot) => (
                                   <span
                                     key={slot.id ?? slot.name}
-                                    className={`max-w-[12rem] truncate rounded border px-1.5 py-0.5 text-[10px] leading-none ${
+                                    className={`max-w-48 truncate rounded border px-1.5 py-0.5 text-[10px] leading-none ${
                                       slot.full
                                         ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
                                         : slot.checking > 0
@@ -843,7 +838,7 @@ export default function StreamChecker() {
                               <tbody className="divide-y">
                                 {profileMatrixRows.map((slot) => (
                                   <tr key={slot.key}>
-                                    <td className="max-w-[12rem] truncate px-2 py-2" title={slot.accountName}>
+                                    <td className="max-w-48 truncate px-2 py-2" title={slot.accountName}>
                                       {slot.accountName}
                                     </td>
                                     <td className="max-w-[18rem] px-2 py-2 font-medium" title={slot.title}>
@@ -933,7 +928,8 @@ export default function StreamChecker() {
                 <div className="mt-4">
                   <Label className="text-sm font-semibold mb-2 block">Stream Progress Tracking</Label>
                   <div className="rounded-md border overflow-y-auto w-full" style={{ maxHeight: `${tableMaxHeight}px` }}>
-                    <table className="w-full text-sm text-left">
+                    <table className="w-full min-w-[800px] text-sm text-left table-fixed" aria-rowcount={sortedStreams.length + 1}>
+                      <colgroup>{[28, 16, 18, 12, 18, 8].map((width, index) => <col key={index} style={{ width: `${width}%` }} />)}</colgroup>
                       <thead className="bg-muted sticky top-0 z-10 text-xs text-muted-foreground uppercase h-8">
                         <tr>
                           <th className="px-3 py-1 font-medium">Stream</th>
@@ -944,25 +940,8 @@ export default function StreamChecker() {
                           <th className="px-3 py-1 font-medium text-right">Score</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y">
-                        {sortedStreams.map((stream) => {
-                          // Per-stream countdown: counts down from stream_duration
-                          // using only client-side time — no backend tracking needed.
+                      <VirtualStreamRows items={sortedStreams} renderRow={(stream) => {
                           const isActive = stream.status === 'checking' || stream.status === 'probing'
-                          let countdownCell = <span className="text-muted-foreground">-</span>
-                          if (isActive && stream.started_at && progress.stream_duration) {
-                            const elapsed = Math.floor((Date.now() - new Date(stream.started_at).getTime()) / 1000)
-                            const remaining = Math.max(0, progress.stream_duration - elapsed)
-                            if (remaining === 0) {
-                              countdownCell = <span className="text-muted-foreground/50">--</span>
-                            } else {
-                              countdownCell = (
-                                <span className={remaining <= 10 ? 'text-amber-500 font-mono text-xs' : 'text-muted-foreground font-mono text-xs'}>
-                                  {formatDuration(remaining)}
-                                </span>
-                              )
-                            }
-                          }
                           const qualityReason = getQualityReasonDisplay(stream)
                           const showMeasuredSpecs = ['completed', 'incomplete_bitrate', 'loop_detected', 'low_quality', 'dead', 'blank', 'freeze'].includes(stream.status)
                           const reservedProfileTitle = [
@@ -1036,7 +1015,7 @@ export default function StreamChecker() {
                                 )}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-right">
-                                {countdownCell}
+                                <StreamCountdown active={isActive} startedAt={stream.started_at} duration={progress.stream_duration} />
                               </td>
                               <td className="px-3 py-1.5 align-middle text-right text-xs text-muted-foreground whitespace-nowrap">
                                 {showMeasuredSpecs ? (
@@ -1058,8 +1037,7 @@ export default function StreamChecker() {
                               </td>
                             </tr>
                           )
-                        })}
-                      </tbody>
+                        }} />
                     </table>
                   </div>
                 </div>
@@ -1222,6 +1200,21 @@ export default function StreamChecker() {
                       <p className="text-xs text-muted-foreground">
                         Delay between retry attempts
                       </p>
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+                      <div className="space-y-0.5">
+                        <Label htmlFor="bitrate_recheck_enabled">Bitrate Recheck</Label>
+                        <p className="text-xs text-muted-foreground">
+                          Recheck missing bitrate serially after initial probes
+                        </p>
+                      </div>
+                      <Switch
+                        id="bitrate_recheck_enabled"
+                        checked={editedConfig?.stream_analysis?.bitrate_recheck_enabled !== false}
+                        onCheckedChange={(checked) => updateConfigValue('stream_analysis.bitrate_recheck_enabled', checked)}
+                        disabled={!configEditing}
+                      />
                     </div>
 
                     <div className="space-y-2">

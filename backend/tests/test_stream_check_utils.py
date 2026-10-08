@@ -13,6 +13,7 @@ import json
 import subprocess
 import sys
 import os
+import threading
 from time import monotonic as real_monotonic, sleep as real_sleep
 
 # Add backend to path
@@ -192,6 +193,43 @@ class TestLoopProbeSampling(unittest.TestCase):
         self.assertEqual(frames_processed, 0)
         self.assertTrue(process.terminated)
 
+    def test_loop_probe_drains_large_stderr_before_waiting(self):
+        """A noisy FFmpeg process must not stall behind its stderr pipe."""
+        drained = threading.Event()
+
+        class WarningPipe(io.BytesIO):
+            def read(self, size=-1):
+                chunk = super().read(size)
+                if not chunk:
+                    drained.set()
+                return chunk
+
+        class NoisyProcess:
+            def __init__(self):
+                self.stdout = io.BytesIO(b"")
+                self.stderr = WarningPipe(b"warning\n" * 200_000)
+                self.killed = False
+
+            def wait(self, timeout=None):
+                if not drained.wait(1):
+                    raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=timeout)
+                return 0
+
+            def kill(self):
+                self.killed = True
+
+        process = NoisyProcess()
+        with patch.object(stream_check_utils.subprocess, "Popen", return_value=process):
+            result = _probe_stream_for_loops(
+                url="http://example.invalid/noisy.ts",
+                stream_tag="test-stderr-drain",
+                probe_duration=60,
+            )
+
+        self.assertEqual(result, (False, None, 0))
+        self.assertTrue(drained.is_set())
+        self.assertFalse(process.killed)
+
     def test_loop_probe_latches_transient_loop_detection(self):
         raw_frames = [self._ppm_frame(frame_index) for frame_index in range(40)]
         pipe_bytes = b"".join(raw_frames)
@@ -329,6 +367,23 @@ class TestGetStreamBitrate(unittest.TestCase):
         self.assertIsNotNone(bitrate)
         self.assertEqual(bitrate, 3333.3)
         self.assertEqual(status, "OK")
+
+    @patch('subprocess.run')
+    def test_ffmpeg_812_progress_with_elapsed_keeps_bitrate(self, mock_run):
+        """FFmpeg 8.1.2 adds elapsed= after speed; bitrate still parses."""
+        mock_run.return_value = MagicMock(
+            stderr=(
+                'frame=   50 fps= 32 q=2.0 Lsize=     106KiB '
+                'time=00:00:01.96 bitrate= 441.2kbits/s speed=1.27x '
+                'elapsed=0:00:01.54\n'
+            ),
+            returncode=0,
+        )
+
+        bitrate, status, _ = get_stream_bitrate('http://test.stream', duration=2)
+
+        self.assertEqual(status, 'OK')
+        self.assertEqual(bitrate, 441.2)
     
     @patch('subprocess.run')
     def test_timeout_handling(self, mock_run):
@@ -344,6 +399,119 @@ class TestGetStreamBitrate(unittest.TestCase):
 
 class TestGetStreamInfoAndBitrate(unittest.TestCase):
     """Test combined ffmpeg analysis with ffprobe safety fallbacks."""
+
+    def test_preemptible_probe_drains_large_stderr_and_keeps_bitrate(self):
+        """A warning flood must not trigger ffprobe or erase later FFmpeg stats."""
+        script = (
+            "import sys; "
+            "sys.stderr.write(('warning noise\\n' * 20000)); "
+            "sys.stderr.write('Input #0, mpegts, from synthetic:\\n'); "
+            "sys.stderr.write('  Stream #0:0: Video: h264, yuv420p, 1280x720, 30 fps\\n'); "
+            "sys.stderr.write('Output #0, mpegts, to pipe:1:\\n'); "
+            "sys.stderr.write('frame= 30 fps=30 size=500kB time=00:00:01.00 bitrate= 4123.0kbits/s speed=1.0x\\n'); "
+            "sys.stderr.write('frame= 30 fps=30 size=0kB time=00:00:01.00 bitrate= 0.0kbits/s speed=1.0x\\n'); "
+            "sys.stderr.flush()"
+        )
+        original_popen = subprocess.Popen
+        launches = []
+
+        def start_fixture(_command, **kwargs):
+            launches.append(_command[0])
+            return original_popen([sys.executable, '-c', script], **kwargs)
+
+        with patch.object(stream_check_utils.subprocess, 'Popen', side_effect=start_fixture):
+            result = get_stream_info_and_bitrate(
+                'http://synthetic.test/stream',
+                duration=1,
+                timeout=2,
+                stream_startup_buffer=0,
+                preempt_check=lambda: False,
+            )
+
+        self.assertEqual(launches, ['ffmpeg'])
+        self.assertEqual(result['status'], 'OK')
+        self.assertEqual(result['resolution'], '1280x720')
+        self.assertEqual(result['bitrate_kbps'], 4123.0)
+        self.assertEqual(result['bitrate_source'], 'ffmpeg_progress')
+        self.assertFalse(result['ffprobe_fallback_ran'])
+
+    def test_preemptible_visual_probe_keeps_detection_after_large_stderr(self):
+        script = (
+            "import sys; "
+            "sys.stderr.write(('warning noise\\n' * 20000)); "
+            "sys.stderr.write('black_start:0 black_end:10 black_duration:10\\n'); "
+            "sys.stderr.write('freeze_start: 0 freeze_end: 10 freeze_duration: 10\\n'); "
+            "sys.stderr.write('frame= 300 time=00:00:10.00 bitrate= 4000.0kbits/s\\n'); "
+            "sys.stderr.flush()"
+        )
+        original_popen = subprocess.Popen
+
+        def start_fixture(_command, **kwargs):
+            return original_popen([sys.executable, '-c', script], **kwargs)
+
+        with patch.object(stream_check_utils.subprocess, 'Popen', side_effect=start_fixture) as popen:
+            result = stream_check_utils._run_visual_detection_probe(
+                'http://synthetic.test/stream',
+                duration=30,
+                timeout=2,
+                user_agent='test',
+                stream_startup_buffer=0,
+                blank_check_enabled=True,
+                blank_check_min_duration=2,
+                blank_check_pixel_threshold=0.1,
+                blank_check_ratio_threshold=0.8,
+                freeze_check_enabled=True,
+                freeze_check_min_duration=5,
+                freeze_check_noise_threshold=0.001,
+                freeze_check_ratio_threshold=0.8,
+                hardware_acceleration=None,
+                preempt_check=lambda: False,
+            )
+
+        self.assertEqual(popen.call_count, 1)
+        self.assertTrue(result['visual_probe_completed'])
+        self.assertTrue(result['blank_detected'])
+        self.assertTrue(result['freeze_detected'])
+        self.assertFalse(result['visual_probe_incomplete'])
+
+    def test_preemptible_probe_keeps_bytes_read_bitrate_fallback(self):
+        script = (
+            "import sys; "
+            "sys.stderr.write(('warning noise\\n' * 20000)); "
+            "sys.stderr.write('Input #0, mpegts, from synthetic:\\n'); "
+            "sys.stderr.write('  Stream #0:0: Video: h264, yuv420p, 1280x720, 30 fps\\n'); "
+            "sys.stderr.write('Output #0, mpegts, to pipe:1:\\n'); "
+            "sys.stderr.write('frame= 30 time=00:00:01.00 bitrate=N/A\\n'); "
+            "sys.stderr.write('Statistics: 200000 bytes read\\n'); "
+            "sys.stderr.write('Statistics: 300000 bytes read\\n'); "
+            "sys.stderr.flush()"
+        )
+        original_popen = subprocess.Popen
+
+        def start_fixture(_command, **kwargs):
+            return original_popen([sys.executable, '-c', script], **kwargs)
+
+        with patch.object(stream_check_utils.subprocess, 'Popen', side_effect=start_fixture) as popen:
+            result = get_stream_info_and_bitrate(
+                'http://synthetic.test/stream',
+                duration=1,
+                timeout=2,
+                stream_startup_buffer=0,
+                preempt_check=lambda: False,
+            )
+
+        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(result['status'], 'OK')
+        self.assertEqual(result['bitrate_kbps'], 4000.0)
+        self.assertEqual(result['bitrate_source'], 'ffmpeg_bytes_read_fallback')
+        self.assertFalse(result['ffprobe_fallback_ran'])
+
+    def test_visual_event_capture_overflow_is_incomplete(self):
+        capture = stream_check_utils._BoundedProbeStderr(visual=True)
+        event = 'black_start:0 black_end:1 black_duration:1\n'
+        capture.feed(event * (capture._VISUAL_EVENT_LIMIT // len(event) + 1))
+        capture.finish()
+        self.assertTrue(capture.incomplete)
 
     @patch('subprocess.run')
     def test_ffprobe_fallback_accepts_valid_media_after_ffmpeg_timeout(self, mock_run):
@@ -897,6 +1065,86 @@ class TestAnalyzeStream(unittest.TestCase):
         self.assertTrue(result['measurement_incomplete'])
         self.assertEqual(result['measurement_incomplete_reason'], 'missing_bitrate')
         self.assertTrue(result['bitrate_recheck_required'])
+
+    @patch('stream_check_utils.get_stream_info_and_bitrate')
+    @patch('time.sleep')
+    def test_disabled_bitrate_only_retry_keeps_no_bitrate_visible(
+        self, mock_sleep, mock_get_info_and_bitrate,
+    ):
+        mock_get_info_and_bitrate.return_value = {
+            'video_codec': 'hevc',
+            'audio_codec': 'aac',
+            'resolution': '3840x2160',
+            'fps': 50.0,
+            'bitrate_kbps': None,
+            'bitrate_source': 'ffprobe_media_fallback_no_bitrate',
+            'hdr_format': 'HLG',
+            'pixel_format': None,
+            'audio_sample_rate': None,
+            'audio_channels': None,
+            'channel_layout': None,
+            'audio_bitrate': None,
+            'status': 'OK',
+            'elapsed_time': 30.5,
+        }
+
+        result = analyze_stream(
+            stream_url='http://test.stream',
+            stream_id=123,
+            ffmpeg_duration=30,
+            retries=2,
+            retry_delay=5,
+            defer_missing_bitrate_retry=False,
+            retry_missing_bitrate=False,
+        )
+
+        mock_get_info_and_bitrate.assert_called_once()
+        mock_sleep.assert_not_called()
+        self.assertEqual(result['status'], 'OK')
+        self.assertEqual(result['attempts'], 1)
+        self.assertIsNone(result['bitrate_kbps'])
+        self.assertTrue(result['measurement_incomplete'])
+        self.assertEqual(result['measurement_incomplete_reason'], 'missing_bitrate')
+        self.assertTrue(result['bitrate_recheck_required'])
+
+    @patch('stream_check_utils.get_stream_info_and_bitrate')
+    @patch('time.sleep')
+    def test_disabled_bitrate_only_retry_preserves_error_and_early_exit_retries(
+        self, mock_sleep, mock_get_info_and_bitrate,
+    ):
+        base = {
+            'video_codec': 'hevc',
+            'audio_codec': 'aac',
+            'resolution': '3840x2160',
+            'fps': 50.0,
+            'bitrate_kbps': None,
+            'hdr_format': 'HLG',
+            'pixel_format': None,
+            'audio_sample_rate': None,
+            'audio_channels': None,
+            'channel_layout': None,
+            'audio_bitrate': None,
+        }
+        mock_get_info_and_bitrate.side_effect = [
+            {**base, 'status': 'Timeout', 'elapsed_time': 30.5},
+            {**base, 'status': 'OK', 'elapsed_time': 1.0},
+            {**base, 'status': 'OK', 'elapsed_time': 30.5},
+        ]
+
+        result = analyze_stream(
+            stream_url='http://test.stream',
+            stream_id=123,
+            ffmpeg_duration=30,
+            retries=2,
+            retry_delay=5,
+            retry_missing_bitrate=False,
+        )
+
+        self.assertEqual(mock_get_info_and_bitrate.call_count, 3)
+        self.assertEqual(mock_sleep.call_count, 2)
+        self.assertEqual(result['status'], 'OK')
+        self.assertEqual(result['attempts'], 3)
+        self.assertEqual(result['measurement_incomplete_reason'], 'missing_bitrate')
 
     @patch('stream_check_utils.get_stream_info_and_bitrate')
     def test_missing_bitrate_stays_alive_but_incomplete_after_last_attempt(self, mock_get_info_and_bitrate):

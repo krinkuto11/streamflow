@@ -11,7 +11,7 @@ import os
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Any, List, Tuple
+from typing import Dict, Optional, Any, List, Tuple, Iterable
 
 from apps.core.logging_config import setup_logging, log_function_call, log_function_return, log_exception
 from apps.core.log_sanitizer import channel_ref, scrub_urls, stream_context, stream_ref
@@ -65,11 +65,10 @@ class DeadStreamsTracker:
     def mark_as_alive(self, stream_url: str) -> bool:
         """Mark a stream as alive (remove from dead streams)."""
         try:
-            # We first fetch it from the total list to get its name for logging
-            dead = self.db.get_dead_streams(as_dict=True)
-            if stream_url in dead:
-                stream_info = dead[stream_url]
-                self.db.remove_dead_stream(stream_url)
+            stream_info = self.db.get_dead_stream_info(stream_url)
+            if stream_info:
+                if not self.db.remove_dead_stream(stream_url):
+                    return False
                 logger.info(f"Revived stream: {stream_ref(stream_info.get('stream_id'), stream_url)}")
             return True
         except Exception as e:
@@ -86,9 +85,11 @@ class DeadStreamsTracker:
     
     def get_dead_reason(self, stream_url: str) -> Optional[str]:
         """Get the reason why a stream was marked as dead."""
-        dead_streams = self.db.get_dead_streams(as_dict=True)
-        info = dead_streams.get(stream_url)
-        return info.get('reason') if info else None
+        return self.db.get_dead_stream_reason(stream_url)
+
+    def get_dead_stream_reasons(self, urls: Optional[Iterable[str]] = None) -> Dict[str, Optional[str]]:
+        """Snapshot URL/reason pairs for one matching or filtering pass."""
+        return self.db.get_dead_stream_reasons(urls)
 
     def is_offline(self, stream_url: str) -> bool:
         """Check if a stream is specifically 'offline'."""

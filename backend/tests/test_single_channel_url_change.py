@@ -91,6 +91,7 @@ class TestSingleChannelURLChange(unittest.TestCase):
         # Mock AutomatedStreamManager
         mock_automation_instance = Mock()
         mock_automation_class.return_value = mock_automation_instance
+        mock_automation_instance.validate_and_remove_non_matching_streams = Mock(return_value={})
         mock_automation_instance.discover_and_assign_streams = Mock(return_value={})
         
         # Create service instance
@@ -191,6 +192,7 @@ class TestSingleChannelURLChange(unittest.TestCase):
         
         mock_automation_instance = Mock()
         mock_automation_class.return_value = mock_automation_instance
+        mock_automation_instance.validate_and_remove_non_matching_streams = Mock(return_value={})
         mock_automation_instance.discover_and_assign_streams = Mock(return_value={})
         
         # Create service instance

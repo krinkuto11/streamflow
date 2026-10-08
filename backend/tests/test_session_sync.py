@@ -101,8 +101,9 @@ class TestSessionSync(unittest.TestCase):
                 manager.stop_session(session1_id)
                 self.assertIsNone(manager.get_session_owner(self.channel_id))
 
-    def test_sync_enforcement_trigger(self):
-        """Test that synchronization check triggers update when interval passes."""
+    @patch('stream_monitoring_service.get_udi_manager')
+    def test_sync_enforcement_trigger(self, mock_get_udi):
+        """A due tick verifies remote state and evaluates without a forced write."""
         from apps.stream.stream_monitoring_service import StreamMonitoringService
         from apps.stream.stream_session_manager import SessionInfo
         
@@ -118,15 +119,18 @@ class TestSessionSync(unittest.TestCase):
         session.channel_id = 999
         session.enforce_sync_interval_ms = 1000 # 1 second
         session.last_sync_time = time.time() - 2.0 # 2 seconds ago (should trigger)
+        session.last_authoritative_sync_time = 0.0
         
         # Mock _evaluate_session_streams
         service._evaluate_session_streams = Mock()
         
         # Run check
-        triggered = service._check_sync_enforcement(session)
+        with patch.object(service.io_pool, 'submit', side_effect=lambda fn, *args: fn(*args)):
+            triggered = service._check_sync_enforcement(session)
         
         self.assertTrue(triggered)
-        service._evaluate_session_streams.assert_called_with("session_1", force_update=True)
+        mock_get_udi.return_value.refresh_channel_by_id.assert_called_once_with(999)
+        service._evaluate_session_streams.assert_called_with("session_1", force_update=False)
         # Verify time updated (approximate)
         self.assertAlmostEqual(session.last_sync_time, time.time(), delta=1.0)
         
@@ -151,6 +155,7 @@ class TestSessionSync(unittest.TestCase):
         
         service.session_manager = Mock()
         service.session_manager.get_session.return_value = session
+        service.session_manager.get_session_owner.return_value = session.session_id
         
         # Mock UDI: Channel has session stream (1) AND alien stream (9999)
         mock_udi = Mock()

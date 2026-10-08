@@ -23,6 +23,7 @@ import inspect
 import re
 import threading
 import time
+from apps.core.operation_timing import STREAM_OPERATION_TIMINGS
 import uuid
 from collections import defaultdict
 from contextlib import ExitStack, nullcontext
@@ -977,7 +978,7 @@ class AccountStreamLimiter:
                 return AcquireResult(False, 'provider_profile_unavailable')
         
         # Poll for available slot with exponential backoff
-        start_time = time.time()
+        start_time = time.monotonic()
         wait_time = 0.1  # Start with 100ms
         max_wait = 2.0  # Max 2 seconds between checks
         
@@ -1026,7 +1027,7 @@ class AccountStreamLimiter:
             
             # No slot available, check timeout
             if timeout is not None:
-                elapsed = time.time() - start_time
+                elapsed = time.monotonic() - start_time
                 if elapsed >= timeout:
                     log_method = logger.debug if timeout <= 0 else logger.warning
                     log_method(
@@ -2681,7 +2682,8 @@ class SmartStreamScheduler:
                     acquired_profile = None
                     acquired_stream_url = None
                     acquired_global = False
-                    wait_started = time.time()
+                    wait_started = time.monotonic()
+                    wait_recorded = False
                     wait_reason = None
                     retrying_after_preempt = False
                     preemption_token = object()
@@ -2897,7 +2899,7 @@ class SmartStreamScheduler:
                                 provider_wait_timeout is not None
                                 and not self._is_internal_capacity_wait(wait_reason)
                             ):
-                                elapsed = time.time() - wait_started
+                                elapsed = time.monotonic() - wait_started
                                 if elapsed >= provider_wait_timeout:
                                     logger.warning(
                                         f"Provider capacity wait timed out for stream {stream['id']} "
@@ -2946,12 +2948,17 @@ class SmartStreamScheduler:
                         if acquired_profile or account_id is not None:
                             runtime_params['preempt_check'] = preempt_check
 
-                        result = check_function(
-                            stream_url=stream_url,
-                            stream_id=stream['id'],
-                            stream_name=stream.get('name', 'Unknown'),
-                            **runtime_params
+                        STREAM_OPERATION_TIMINGS.record(
+                            'provider_wait', time.monotonic() - wait_started,
                         )
+                        wait_recorded = True
+                        with STREAM_OPERATION_TIMINGS.measure('analysis'):
+                            result = check_function(
+                                stream_url=stream_url,
+                                stream_id=stream['id'],
+                                stream_name=stream.get('name', 'Unknown'),
+                                **runtime_params
+                            )
                         if isinstance(result, dict):
                             # Credential-rewritten URLs are probe-only. Persisted,
                             # returned, and callback-visible results must retain
@@ -2978,6 +2985,8 @@ class SmartStreamScheduler:
                             return wrapped_check(preempted_for_viewer=True)
                         return result
                     finally:
+                        if not wait_recorded:
+                            STREAM_OPERATION_TIMINGS.record('provider_wait', time.monotonic() - wait_started)
                         finalize_completion()
 
                 # Submit to executor

@@ -54,8 +54,24 @@ def _add_v6_run_history_columns(connection: Connection) -> None:
             )
 
 
+def _add_session_type_column(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "monitoring_sessions" not in tables:
+        return
+    if "session_type" not in _table_columns(connection, "monitoring_sessions"):
+        connection.exec_driver_sql(
+            'ALTER TABLE "monitoring_sessions" ADD COLUMN "session_type" VARCHAR(20) DEFAULT \'ffmpeg\''
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "add_v6_run_history_columns", _add_v6_run_history_columns),
+    Migration(2, "add_monitoring_session_type", _add_session_type_column),
 )
 
 

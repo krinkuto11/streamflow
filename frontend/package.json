@@ -43,20 +43,20 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-hook-form": "^7.68.0",
-    "react-router-dom": "^6.30.4",
+    "react-router-dom": "^7.18.4",
     "recharts": "^2.8.0",
-    "tailwind-merge": "^2.6.0",
+    "tailwind-merge": "^3.7.0",
     "tailwindcss-animate": "^1.0.7",
     "zod": "^4.1.13"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^22.10.1",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^6.0.1",
-    "autoprefixer": "^10.4.20",
     "postcss": "^8.5.23",
-    "tailwindcss": "^3.4.17",
+    "tailwindcss": "^4.3.3",
     "vite": "^8.1.4",
     "vitest": "^4.1.0"
   }

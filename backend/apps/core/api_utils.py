@@ -13,8 +13,10 @@ import os
 import json
 import threading
 import time
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Callable
 import requests
+from apps.core import http_transport
+from apps.core.operation_timing import STREAM_OPERATION_TIMINGS
 from pathlib import Path
 from dotenv import load_dotenv, set_key
 
@@ -43,8 +45,11 @@ from apps.core.auth import (
 )
 
 logger = setup_logging(__name__)
+CONTROL_PLANE_TIMINGS = STREAM_OPERATION_TIMINGS
 
 _stream_stats_update_lock = threading.RLock()
+_channel_assignment_locks_guard = threading.Lock()
+_channel_assignment_locks: Dict[int, Any] = {}
 _BITRATE_INCOMPLETE_REASONS = {
     'missing_bitrate',
     'missing_bitrate_after_recheck',
@@ -76,12 +81,12 @@ def fetch_data_from_url(url: str) -> Optional[Any]:
         Optional[Any]: JSON response data if successful, None otherwise.
     """
     log_function_call(logger, "fetch_data_from_url", url=url[:80] if len(url) > 80 else url)
-    start_time = time.time()
+    start_time = time.monotonic()
     
     try:
         log_api_request(logger, "GET", url)
-        resp = requests.get(url, headers=_get_auth_headers(), timeout=30)
-        elapsed = time.time() - start_time
+        resp = http_transport.get(url, headers=_get_auth_headers(), timeout=30)
+        elapsed = time.monotonic() - start_time
         log_api_response(logger, "GET", url, resp.status_code, elapsed)
         
         resp.raise_for_status()
@@ -100,15 +105,15 @@ def fetch_data_from_url(url: str) -> Optional[Any]:
             logger.debug("Got 401 response, attempting token refresh")
             if _refresh_token():
                 logger.info("Retrying request with new token...")
-                retry_start = time.time()
+                retry_start = time.monotonic()
                 log_api_request(logger, "GET", url)
-                resp = requests.get(url, headers=_get_auth_headers(), timeout=30)
-                retry_elapsed = time.time() - retry_start
+                resp = http_transport.get(url, headers=_get_auth_headers(), timeout=30)
+                retry_elapsed = time.monotonic() - retry_start
                 log_api_response(logger, "GET", url, resp.status_code, retry_elapsed)
                 
                 resp.raise_for_status()
                 data = resp.json()
-                total_elapsed = time.time() - start_time
+                total_elapsed = time.monotonic() - start_time
                 log_function_return(logger, "fetch_data_from_url", f"<data: {type(data).__name__}>", total_elapsed)
                 return data
             else:
@@ -122,122 +127,78 @@ def fetch_data_from_url(url: str) -> Optional[Any]:
         return None
 
 def patch_request(url: str, payload: Dict[str, Any], max_retries: int = 2) -> requests.Response:
-    """
-    Send a PATCH request with authentication and retry logic.
-    
-    Makes an authenticated PATCH request to the specified URL. If the
-    request fails with a 401 error, automatically refreshes the token
-    and retries once. Handle 5xx errors and network issues with retries.
-    
-    Parameters:
-        url (str): The URL to send the PATCH request to.
-        payload (Dict[str, Any]): The JSON payload to send.
-        max_retries (int): Maximum attempts for transient 500 errors.
-        
-    Returns:
-        requests.Response: The response object from the request.
-        
-    Raises:
-        requests.exceptions.RequestException: If request fails.
-    """
-    retries = 0
-    while retries <= max_retries:
+    """Write an absolute-field PATCH with bounded auth/transient retries."""
+    max_retries = max(0, int(max_retries))
+    for attempt in range(max_retries + 1):
         try:
-            resp = requests.patch(
-                url, json=payload, headers=_get_auth_headers(), timeout=30
-            )
-            resp.raise_for_status()
-            return resp
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                if _refresh_token():
-                    logger.info("Retrying PATCH request with new token...")
-                    resp = requests.patch(
-                        url, json=payload, headers=_get_auth_headers(), timeout=30
-                    )
-                    resp.raise_for_status()
-                    return resp
-                else:
-                    raise
-            elif e.response.status_code >= 500 and retries < max_retries:
-                logger.warning(f"Got HTTP {e.response.status_code} patching data to {url}. Retrying {retries+1}/{max_retries}...")
-                import time
-                time.sleep(2)
-                retries += 1
-                continue
-            else:
-                logger.error(
-                    f"Error patching data to {url}: {e.response.text}"
-                )
+            with CONTROL_PLANE_TIMINGS.measure("dispatcharr_write"):
+                response = http_transport.patch(url, json=payload, headers=_get_auth_headers(), timeout=30)
+            if response.status_code == 401 and attempt == 0 and _refresh_token():
+                with CONTROL_PLANE_TIMINGS.measure("dispatcharr_write"):
+                    response = http_transport.patch(url, json=payload, headers=_get_auth_headers(), timeout=30)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if (status is not None and status < 500 and status != 429) or attempt >= max_retries:
                 raise
-        except requests.exceptions.RequestException as e:
-            if retries < max_retries:
-                logger.warning(f"Network error patching data to {url}: {e}. Retrying {retries+1}/{max_retries}...")
-                import time
-                time.sleep(2)
-                retries += 1
-                continue
-            logger.error(f"Error patching data to {url}: {e}")
-            raise
+            delay = min(8.0, 2.0 ** (attempt + 1))
+            if status == 429:
+                try:
+                    delay = min(30.0, max(0.0, float(exc.response.headers.get("Retry-After", delay))))
+                except (TypeError, ValueError):
+                    pass
+            time.sleep(delay)
+    raise RuntimeError("PATCH retry loop did not return a response")
 
-def post_request(url: str, payload: Dict[str, Any], max_retries: int = 2) -> requests.Response:
+
+class UncertainPostResult(requests.exceptions.RequestException):
+    """A control-plane POST may have succeeded; repeating it is unsafe."""
+
+
+def post_request(
+    url: str, payload: Dict[str, Any], max_retries: int = 2, *,
+    retry_safe: bool = False,
+    reconcile: Optional[Callable[[], Optional[requests.Response]]] = None,
+) -> requests.Response:
+    """POST with operation-aware retries and optional read-only reconciliation.
+
+    Authentication rejection and connection establishment failures can be
+    retried. A read timeout, connection loss, or server error after admission
+    is ambiguous for creation/start operations and must not replay the POST.
+    Set retry_safe only for an explicitly idempotent operation.
     """
-    Send a POST request with authentication and retry logic.
-    
-    Makes an authenticated POST request to the specified URL. If the
-    request fails with a 401 error, automatically refreshes the token
-    and retries once. Handle 5xx errors and network issues with retries.
-    
-    Parameters:
-        url (str): The URL to send the POST request to.
-        payload (Dict[str, Any]): The JSON payload to send.
-        max_retries (int): Maximum attempts for transient 500 errors.
-        
-    Returns:
-        requests.Response: The response object from the request.
-        
-    Raises:
-        requests.exceptions.RequestException: If request fails.
-    """
-    retries = 0
-    while retries <= max_retries:
+    max_retries = max(0, int(max_retries))
+    for attempt in range(max_retries + 1):
         try:
-            resp = requests.post(
-                url, json=payload, headers=_get_auth_headers(), timeout=30
-            )
-            resp.raise_for_status()
-            return resp
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                if _refresh_token():
-                    logger.info("Retrying POST request with new token...")
-                    resp = requests.post(
-                        url, json=payload, headers=_get_auth_headers(), timeout=30
-                    )
-                    resp.raise_for_status()
-                    return resp
-                else:
-                    raise
-            elif e.response.status_code >= 500 and retries < max_retries:
-                logger.warning(f"Got HTTP {e.response.status_code} posting data to {url}. Retrying {retries+1}/{max_retries}...")
-                import time
-                time.sleep(2)
-                retries += 1
-                continue
-            else:
-                logger.error(
-                    f"Error posting data to {url}: {e.response.text}"
-                )
+            with CONTROL_PLANE_TIMINGS.measure("dispatcharr_write"):
+                response = http_transport.post(url, json=payload, headers=_get_auth_headers(), timeout=30)
+            if response.status_code == 401 and attempt == 0 and _refresh_token():
+                # The unauthorized request was rejected, not accepted.
+                with CONTROL_PLANE_TIMINGS.measure("dispatcharr_write"):
+                    response = http_transport.post(url, json=payload, headers=_get_auth_headers(), timeout=30)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            transient = status is None or status >= 500 or status == 429
+            not_admitted = isinstance(exc, requests.exceptions.ConnectTimeout) or status == 429
+            if transient and not not_admitted and not retry_safe:
+                if reconcile is not None:
+                    try:
+                        reconciled = reconcile()
+                    except Exception:
+                        reconciled = None
+                    if reconciled is not None:
+                        return reconciled
+                raise UncertainPostResult(
+                    "POST outcome is unknown; automatic replay was suppressed",
+                    response=getattr(exc, "response", None),
+                ) from exc
+            if not transient or attempt >= max_retries:
                 raise
-        except requests.exceptions.RequestException as e:
-            if retries < max_retries:
-                logger.warning(f"Network error posting data to {url}: {e}. Retrying {retries+1}/{max_retries}...")
-                import time
-                time.sleep(2)
-                retries += 1
-                continue
-            logger.error(f"Error posting data to {url}: {e}")
-            raise
+            time.sleep(min(8.0, 2.0 ** (attempt + 1)))
+    raise RuntimeError("POST retry loop did not return a response")
 
 def fetch_channel_streams(channel_id: int) -> Optional[List[Dict[str, Any]]]:
     """
@@ -272,10 +233,110 @@ def _dedupe_stream_ids(stream_ids: List[int]) -> List[int]:
     return deduped
 
 
+def get_channel_assignment_lock(channel_id: int) -> threading.RLock:
+    """Serialize StreamFlow assignment writers for one Dispatcharr channel."""
+    channel_id = int(channel_id)
+    with _channel_assignment_locks_guard:
+        lock = _channel_assignment_locks.get(channel_id)
+        if lock is None:
+            lock = threading.RLock()
+            _channel_assignment_locks[channel_id] = lock
+        return lock
+
+
+def _fetch_authoritative_channel_stream_ids(channel_id: int) -> Optional[List[int]]:
+    """Read the full ordered assignment directly from Dispatcharr, including UDI misses."""
+    url = f"{_get_base_url()}/api/channels/channels/{channel_id}/"
+    channel = fetch_data_from_url(url)
+    if not isinstance(channel, dict) or not isinstance(channel.get('streams'), list):
+        logger.error("Could not read authoritative assignment for channel %s", channel_id)
+        return None
+    try:
+        stream_ids = [int(stream_id) for stream_id in channel['streams']]
+    except (TypeError, ValueError):
+        logger.error("Invalid authoritative assignment for channel %s", channel_id)
+        return None
+    try:
+        cached_channel = dict(channel)
+        cached_channel['streams'] = stream_ids
+        get_udi_manager().update_channel(channel_id, cached_channel)
+    except Exception as exc:
+        logger.warning("Could not refresh channel %s in UDI after read: %s", channel_id, exc)
+    return stream_ids
+
+
+def _verify_channel_assignment_after_patch(channel_id: int, expected_ids: List[int]) -> bool:
+    """Confirm that Dispatcharr applied the exact ordered list before reporting success."""
+    actual_ids = None
+    for attempt in range(2):
+        if attempt:
+            time.sleep(0.2)
+        actual_ids = _fetch_authoritative_channel_stream_ids(channel_id)
+        if actual_ids == expected_ids:
+            return True
+    logger.error(
+        "Channel %s assignment readback differs after PATCH: expected %s, found %s",
+        channel_id, expected_ids[:10],
+        actual_ids[:10] if actual_ids is not None else None,
+    )
+    return False
+
+
+def _verify_missing_stream_ids(
+    requested_ids: List[int], cached_valid_ids: set, channel_id: int
+) -> Optional[set]:
+    """Verify cache misses against Dispatcharr before a channel write.
+
+    A stale UDI stream cache must never silently turn an assignment into a
+    removal. The IDs endpoint is consulted only when a requested ID is absent
+    from the cache, so normal writes do not add an extra API request.
+    """
+    cached_valid_ids = set(cached_valid_ids)
+    if all(stream_id in cached_valid_ids for stream_id in requested_ids):
+        return cached_valid_ids
+
+    url = f"{_get_base_url()}/api/channels/streams/ids/"
+    try:
+        authoritative_ids = fetch_data_from_url(url)
+    except Exception as exc:
+        logger.error("Could not verify stream IDs for channel %s: %s", channel_id, exc)
+        return None
+    if not isinstance(authoritative_ids, list) or not authoritative_ids:
+        logger.error(
+            "Cannot verify missing stream IDs for channel %s; refusing channel write",
+            channel_id,
+        )
+        return None
+    try:
+        verified_ids = {int(stream_id) for stream_id in authoritative_ids}
+    except (TypeError, ValueError):
+        logger.error("Invalid Dispatcharr stream ID response for channel %s", channel_id)
+        return None
+    return verified_ids
+
+
 def update_channel_streams(
     channel_id: int, stream_ids: List[int], valid_stream_ids: Optional[set] = None,
     allow_dead_streams: bool = False,
     protected_stream_ids: Optional[set] = None,
+    expected_current_stream_ids: Optional[List[int]] = None,
+) -> bool:
+    with get_channel_assignment_lock(channel_id):
+        return _update_channel_streams_locked(
+            channel_id,
+            stream_ids,
+            valid_stream_ids=valid_stream_ids,
+            allow_dead_streams=allow_dead_streams,
+            protected_stream_ids=protected_stream_ids,
+            expected_current_stream_ids=expected_current_stream_ids,
+        )
+
+
+def _update_channel_streams_locked(
+    channel_id: int, stream_ids: List[int], valid_stream_ids: Optional[set] = None,
+    allow_dead_streams: bool = False,
+    protected_stream_ids: Optional[set] = None,
+    expected_current_stream_ids: Optional[List[int]] = None,
 ) -> bool:
     """
     Update the streams for a given channel ID.
@@ -293,6 +354,9 @@ def update_channel_streams(
             global checks to give dead streams a second chance). Default False.
         protected_stream_ids (Optional[set]): Stream IDs that must survive the
             dead-stream filter because an active viewer is currently using them.
+        expected_current_stream_ids (Optional[List[int]]): When supplied, refuse
+            to overwrite a channel whose authoritative assignment changed after
+            the caller calculated its desired full list.
         
     Returns:
         bool: True if update successful, False otherwise.
@@ -303,6 +367,11 @@ def update_channel_streams(
     # Filter out stream IDs that no longer exist in Dispatcharr
     if valid_stream_ids is None:
         valid_stream_ids = get_valid_stream_ids()
+
+    if stream_ids:
+        valid_stream_ids = _verify_missing_stream_ids(stream_ids, valid_stream_ids, channel_id)
+        if valid_stream_ids is None:
+            return False
     
     original_count = len(stream_ids)
     valid_filtered_stream_ids = [sid for sid in stream_ids if sid in valid_stream_ids]
@@ -341,6 +410,24 @@ def update_channel_streams(
     
     url = f"{_get_base_url()}/api/channels/channels/{channel_id}/"
     data = {"streams": filtered_stream_ids}
+
+    if expected_current_stream_ids is not None:
+        current_stream_ids = _fetch_authoritative_channel_stream_ids(channel_id)
+        if current_stream_ids is None:
+            return False
+        try:
+            expected_ids = [int(stream_id) for stream_id in expected_current_stream_ids]
+        except (TypeError, ValueError):
+            logger.error("Invalid expected assignment for channel %s", channel_id)
+            return False
+        if current_stream_ids != expected_ids:
+            logger.warning(
+                "Channel %s assignment changed before write: expected %s, found %s; refusing stale PATCH",
+                channel_id, expected_ids[:10], current_stream_ids[:10],
+            )
+            return False
+        if current_stream_ids == filtered_stream_ids:
+            return True
     
     try:
         response = patch_request(url, data)
@@ -350,19 +437,7 @@ def update_channel_streams(
                 f"{len(filtered_stream_ids)} streams"
             )
 
-            # Update UDI cache directly — we know exactly which streams were
-            # assigned, so no extra HTTP call is needed.
-            try:
-                udi = get_udi_manager()
-                channel = udi.get_channel_by_id(channel_id)
-                if channel:
-                    updated = channel.copy()
-                    updated['streams'] = filtered_stream_ids
-                    udi.update_channel(channel_id, updated)
-            except Exception as e:
-                logger.warning(f"Failed to update UDI cache for channel {channel_id}: {e}")
-
-            return True
+            return _verify_channel_assignment_after_patch(channel_id, filtered_stream_ids)
         else:
             status = response.status_code if response else 'None'
             logger.warning(
@@ -397,6 +472,14 @@ def update_channel_streams(
                 
                 # Retry with validated IDs
                 if revalidated_stream_ids:
+                    if expected_current_stream_ids is not None:
+                        current_stream_ids = _fetch_authoritative_channel_stream_ids(channel_id)
+                        if current_stream_ids != expected_ids:
+                            logger.warning(
+                                "Channel %s changed before assignment retry; refusing stale PATCH",
+                                channel_id,
+                            )
+                            return False
                     retry_data = {"streams": revalidated_stream_ids}
                     retry_response = patch_request(url, retry_data)
                     if retry_response and retry_response.status_code in [200, 204]:
@@ -404,15 +487,9 @@ def update_channel_streams(
                             f"✓ Successfully updated channel {channel_id} with "
                             f"{len(revalidated_stream_ids)} validated streams (after retry)"
                         )
-                        try:
-                            channel = udi.get_channel_by_id(channel_id)
-                            if channel:
-                                updated = channel.copy()
-                                updated['streams'] = revalidated_stream_ids
-                                udi.update_channel(channel_id, updated)
-                        except Exception as cache_err:
-                            logger.warning(f"Failed to update UDI cache for channel {channel_id} after retry: {cache_err}")
-                        return True
+                        return _verify_channel_assignment_after_patch(
+                            channel_id, revalidated_stream_ids
+                        )
                 else:
                     logger.warning(
                         f"No valid streams remaining for channel {channel_id} after UDI refresh"
@@ -598,8 +675,20 @@ def filter_dead_streams(stream_ids: List[int], stream_id_to_url: Optional[Dict[i
         from apps.stream.dead_streams_tracker import DeadStreamsTracker
         tracker = DeadStreamsTracker()
     except Exception as e:
-        logger.warning(f"Could not load dead streams tracker in filter_dead_streams: {e}")
-        return stream_ids, 0
+        raise RuntimeError("Dead stream tracker unavailable; refusing channel write") from e
+
+    # The previous per-stream calls performed one SQL query for each URL; the
+    # offline branch even reloaded the entire dead-stream table each time.
+    # Keep the snapshot local to this write so changes made by subsequent
+    # checks/revival operations are visible to the next call.
+    try:
+        dead_reasons = tracker.get_dead_stream_reasons(
+            {stream_id_to_url.get(sid) for sid in stream_ids if stream_id_to_url.get(sid)}
+        )
+    except Exception as e:
+        raise RuntimeError("Dead stream snapshot unavailable; refusing channel write") from e
+    if not isinstance(dead_reasons, dict):
+        raise RuntimeError("Invalid dead stream snapshot; refusing channel write")
     
     filtered_stream_ids = []
     count_filtered = 0
@@ -611,13 +700,7 @@ def filter_dead_streams(stream_ids: List[int], stream_id_to_url: Optional[Dict[i
             filtered_stream_ids.append(sid)
             continue
             
-        is_dead = False
-        if only_offline:
-            # Only filter if truly offline
-            is_dead = tracker.is_offline(url)
-        else:
-            # Filter if dead for any reason
-            is_dead = tracker.is_dead(url)
+        is_dead = dead_reasons.get(url) == 'offline' if only_offline else url in dead_reasons
             
         if is_dead:
             count_filtered += 1
@@ -664,9 +747,49 @@ def create_channel_from_stream(
     if channel_group_id:
         data["channel_group_id"] = channel_group_id
     
-    return post_request(url, data)
+    fetcher = get_udi_manager().fetcher
+    baseline = fetcher.fetch_channel_ids()
+
+    def reconcile_created_channel():
+        if baseline is None:
+            return None
+        current = fetcher.fetch_channel_ids()
+        if current is None:
+            return None
+        candidates = []
+        for candidate_id in current - baseline:
+            channel = fetcher.fetch_channel_by_id(candidate_id)
+            if not channel or int(stream_id) not in {int(sid) for sid in channel.get('streams') or []}:
+                continue
+            if name and channel.get('name') != name:
+                continue
+            if channel_number is not None and str(channel.get('channel_number')) != str(channel_number):
+                continue
+            if channel_group_id and str(channel.get('channel_group_id')) != str(channel_group_id):
+                continue
+            candidates.append(channel)
+        if len(candidates) != 1:
+            return None
+        response = requests.Response()
+        response.status_code = 201
+        response.headers['Content-Type'] = 'application/json'
+        response._content = json.dumps(candidates[0]).encode('utf-8')
+        response.url = url
+        return response
+
+    return post_request(url, data, reconcile=reconcile_created_channel)
 
 def add_streams_to_channel(
+    channel_id: int, stream_ids: List[int], valid_stream_ids: Optional[set] = None,
+    allow_dead_streams: bool = False
+) -> int:
+    with get_channel_assignment_lock(channel_id):
+        return _add_streams_to_channel_locked(
+            channel_id, stream_ids, valid_stream_ids, allow_dead_streams
+        )
+
+
+def _add_streams_to_channel_locked(
     channel_id: int, stream_ids: List[int], valid_stream_ids: Optional[set] = None,
     allow_dead_streams: bool = False
 ) -> int:
@@ -692,36 +815,27 @@ def add_streams_to_channel(
     Raises:
         ValueError: If current streams cannot be fetched.
     """
-    # First get current streams
-    current_streams = fetch_channel_streams(channel_id)
-    if current_streams is None:
+    # A UDI snapshot can lag behind a manual edit or another StreamFlow writer.
+    # Read the complete assignment inside the channel lock before appending.
+    current_stream_ids = _fetch_authoritative_channel_stream_ids(channel_id)
+    if current_stream_ids is None:
         raise ValueError(
-            f"Could not fetch current streams for channel "
+            f"Could not fetch current assignment for channel "
             f"{channel_id}"
         )
-    
-    current_stream_ids = _dedupe_stream_ids([s['id'] for s in current_streams])
-
-    # Preserve any stream IDs that are assigned to the channel in Dispatcharr but were
-    # not returned by fetch_channel_streams() due to a stale UDI stream cache.
-    # Without this, those streams would be silently dropped when updated_streams is
-    # written back to the channel.
-    _raw_channel = get_udi_manager().get_channel_by_id(channel_id)
-    if _raw_channel:
-        _raw_ids = _raw_channel.get('streams', [])
-        _current_id_set = set(current_stream_ids)
-        _uncached = [sid for sid in _raw_ids if sid not in _current_id_set]
-        if _uncached:
-            logger.warning(
-                f"add_streams_to_channel: channel {channel_id} has {len(_uncached)} "
-                f"stream ID(s) not in UDI stream cache — preserving to avoid accidental "
-                f"removal: {_uncached[:5]}{'...' if len(_uncached) > 5 else ''}"
-            )
-            current_stream_ids = _dedupe_stream_ids(current_stream_ids + _uncached)
+    current_stream_ids = _dedupe_stream_ids(current_stream_ids)
     
     # Filter out stream IDs that no longer exist in Dispatcharr
     if valid_stream_ids is None:
         valid_stream_ids = get_valid_stream_ids()
+    if stream_ids or current_stream_ids:
+        valid_stream_ids = _verify_missing_stream_ids(
+            current_stream_ids + stream_ids, valid_stream_ids, channel_id
+        )
+        if valid_stream_ids is None:
+            raise RuntimeError(
+                f"Could not verify stream IDs for channel {channel_id} before assignment"
+            )
     
     current_stream_id_set = set(current_stream_ids)
     valid_new_stream_ids = _dedupe_stream_ids([
@@ -748,7 +862,11 @@ def add_streams_to_channel(
     
     if valid_new_stream_ids:
         updated_streams = _dedupe_stream_ids(current_stream_ids + valid_new_stream_ids)
-        update_channel_streams(channel_id, updated_streams, valid_stream_ids, allow_dead_streams)
+        if not update_channel_streams(
+            channel_id, updated_streams, valid_stream_ids, allow_dead_streams,
+            expected_current_stream_ids=current_stream_ids,
+        ):
+            raise RuntimeError(f"Dispatcharr rejected stream assignment for channel {channel_id}")
         logger.info(
             f"Added {len(valid_new_stream_ids)} new streams to channel "
             f"{channel_id}"
@@ -807,7 +925,7 @@ def _merge_stream_stats_update(
 
 def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_size: int = 10) -> Tuple[int, int]:
     """
-    Batch update stream stats to reduce API calls during stream checking.
+    Write stream stats in bounded chunks through the existing per-stream API.
     
     This function updates multiple stream stats in batches to optimize performance
     during large-scale stream checking operations. Instead of making one API call
@@ -850,7 +968,7 @@ def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_siz
         logger.error(f"Failed to get UDI manager: {e}")
         return 0, total
     
-    # Process in batches to limit concurrent API calls
+    # Group sequential writes into chunks; Dispatcharr has no bulk stats endpoint here.
     for i in range(0, total, batch_size):
         batch = stream_stats_list[i:i + batch_size]
         logger.debug(f"Processing batch {i // batch_size + 1}/{(total + batch_size - 1) // batch_size} ({len(batch)} streams)")

@@ -35,6 +35,8 @@ RUNTIME_CREDENTIAL_ENV_KEYS = (
     'DISPATCHARR_PASS_FILE',
     'DISPATCHARR_TOKEN',
     'DISPATCHARR_USER',
+    'OPENSTREAM_API_KEY',
+    'OPENSTREAM_API_KEY_FILE',
     'SHADOW_WATCHER_API_KEY',
     'SHADOW_WATCHER_API_KEY_FILE',
 )
@@ -92,6 +94,7 @@ def clean_test_db(monkeypatch, tmp_path):
     import apps.database.connection as conn
     import apps.database.manager as mgr
     import apps.config.dispatcharr_config as dispatcharr_config_module
+    import apps.config.openstream_config as openstream_config_module
     import apps.stream.stream_screenshot_service as screenshot_module
 
     screenshot_module._service_instance = None
@@ -117,6 +120,7 @@ def clean_test_db(monkeypatch, tmp_path):
     # instance that uses the patched session factory.
     mgr._db_manager = None
     dispatcharr_config_module._dispatcharr_config = None
+    openstream_config_module._openstream_config = None
 
     # Create all tables
     from apps.database.connection import Base
@@ -132,6 +136,7 @@ def clean_test_db(monkeypatch, tmp_path):
     reset_stream_limiter_state()
     mgr._db_manager = None
     dispatcharr_config_module._dispatcharr_config = None
+    openstream_config_module._openstream_config = None
     screenshot_module._service_instance = None
     Base.metadata.drop_all(test_engine)
     test_engine.dispose()

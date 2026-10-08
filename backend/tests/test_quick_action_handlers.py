@@ -3,13 +3,105 @@ from unittest.mock import Mock
 import pytest
 from flask import Flask
 
-from apps.api.quick_action_handlers import refresh_playlist_response
+from apps.api.quick_action_handlers import discover_streams_response, refresh_playlist_response
 from apps.automation.automated_stream_manager import RefreshResult
 
 
 @pytest.fixture
 def app():
     return Flask(__name__)
+
+
+@pytest.mark.parametrize("counts", [{"7": 2, 9: 4}, {}])
+@pytest.mark.parametrize("structured", [False, True])
+def test_discovery_returns_only_validated_assignment_counts(app, counts, structured):
+    marker = "secret://provider:password@internal.example/private-path"
+    manager = Mock()
+    manager.discover_and_assign_streams.return_value = (
+        {
+            "assignment_count": counts,
+            "assignment_details": [{"error": marker}],
+            "stats": {"exception": marker},
+        }
+        if structured else counts
+    )
+
+    with app.app_context():
+        response = discover_streams_response(get_automation_manager=lambda: manager)
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "message": "Stream discovery completed",
+        "assignments": {str(key): value for key, value in counts.items()},
+        "total_assigned": sum(counts.values()),
+    }
+    assert marker not in response.get_data(as_text=True)
+    manager.discover_and_assign_streams.assert_called_once_with(force=True)
+
+
+@pytest.mark.parametrize("aborted", [False, True])
+@pytest.mark.parametrize("partial_writes", [False, True])
+def test_discovery_failure_does_not_expose_exception_or_nested_stats(app, aborted, partial_writes):
+    marker = "secret://provider:password@internal.example/private-path"
+    try:
+        raise RuntimeError(marker)
+    except RuntimeError as exc:
+        result = {
+            "success": False,
+            "aborted": aborted,
+            "partial_writes": partial_writes,
+            "error": str(exc),
+            "assignment_count": {"7": 2} if partial_writes else {},
+            "assignment_details": [{"error": str(exc)}],
+            "stats": {"worker": {"exception": str(exc)}},
+        }
+    manager = Mock()
+    manager.discover_and_assign_streams.return_value = result
+
+    with app.app_context():
+        response, status = discover_streams_response(get_automation_manager=lambda: manager)
+
+    assert status == (409 if aborted else 500)
+    assert response.get_json() == {
+        "success": False,
+        "aborted": aborted,
+        "partial_writes": partial_writes,
+        "error": "Stream discovery was aborted" if aborted else "Stream discovery failed",
+        "code": "stream_discovery_aborted" if aborted else "stream_discovery_failed",
+    }
+    assert marker not in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize("result", [
+    None,
+    [],
+    {"assignment_count": []},
+    {"assignment_count": {"7": "secret-in-count"}},
+    {"assignment_count": {"secret-in-channel-id": 3}},
+    {"assignment_count": {True: 3}},
+    {"assignment_count": {"7": True}},
+    {"assignment_count": {"7": -1}},
+])
+def test_discovery_rejects_invalid_manager_results_without_echoing_details(app, result):
+    manager = Mock()
+    manager.discover_and_assign_streams.return_value = result
+
+    with app.app_context():
+        response, status = discover_streams_response(get_automation_manager=lambda: manager)
+
+    assert status == 500
+    assert response.get_json() == {"error": "Internal Server Error"}
+
+
+def test_discovery_unexpected_exception_uses_generic_error(app):
+    manager = Mock()
+    manager.discover_and_assign_streams.side_effect = RuntimeError("secret-provider-credentials")
+
+    with app.app_context():
+        response, status = discover_streams_response(get_automation_manager=lambda: manager)
+
+    assert status == 500
+    assert response.get_json() == {"error": "Internal Server Error"}
 
 
 def test_refresh_playlist_forwards_requested_account_id(app):

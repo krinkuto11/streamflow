@@ -49,6 +49,7 @@ class StreamCheckConfig:
             'stream_startup_buffer': 10, # seconds buffer for stream startup (max time before stream starts)
             'retries': 1,               # retry attempts
             'retry_delay': 10,          # seconds between retries
+            'bitrate_recheck_enabled': True,  # serially recheck missing bitrate after initial probes
             'max_loop_duration': 120,   # maximum loop period to detect (seconds); probe runs for 3× this value
             'blank_check_min_duration': 2.0,  # seconds of continuous black before blackdetect logs a segment
             'blank_check_pixel_threshold': 0.10,  # blackdetect pix_th threshold
@@ -558,6 +559,19 @@ class ChannelUpdateTracker:
                 }
             self._save_updates()
     
+    def invalidate_checked_streams(self, channel_id: int, stream_ids) -> None:
+        """Drop immunity only for streams whose source metadata changed."""
+        changed = {int(sid) for sid in stream_ids}
+        if not changed:
+            return
+        with self.lock:
+            entry = self.updates.get('channels', {}).get(str(channel_id))
+            if entry is not None:
+                entry['checked_stream_ids'] = [sid for sid in entry.get('checked_stream_ids', []) if int(sid) not in changed]
+                entry['needs_check'] = True
+                entry['last_check'] = None
+                self._save_updates()
+
     def get_checked_stream_ids(self, channel_id: int) -> List[int]:
         """Get the list of stream IDs that have been checked for a channel.
         

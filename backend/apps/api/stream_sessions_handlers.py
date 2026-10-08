@@ -3,7 +3,7 @@
 import queue
 import time
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -45,6 +45,8 @@ def get_stream_sessions_response(*, status: str, get_session_manager: Callable[[
                 "stagger_ms": session.stagger_ms,
                 "timeout_ms": session.timeout_ms,
                 "probe_interval_ms": session.probe_interval_ms,
+                "evaluation_interval_ms": session.evaluation_interval_ms,
+                "enforce_sync_interval_ms": session.enforce_sync_interval_ms,
                 "screenshot_interval_seconds": session.screenshot_interval_seconds,
                 "window_size": session.window_size,
                 "stream_count": len(session.streams) if session.streams else 0,
@@ -69,6 +71,7 @@ def get_stream_sessions_response(*, status: str, get_session_manager: Callable[[
                 "channel_tvg_id": session.channel_tvg_id,
                 "auto_created": session.auto_created,
                 "auto_create_rule_id": session.auto_create_rule_id,
+                "session_type": getattr(session, "session_type", "ffmpeg"),
             }
             sessions_data.append(session_dict)
 
@@ -117,12 +120,15 @@ def create_stream_session_response(
             pre_event_minutes=data.pre_event_minutes,
             stagger_ms=data.stagger_ms,
             timeout_ms=data.timeout_ms,
+            evaluation_interval_ms=data.evaluation_interval_ms,
+            enforce_sync_interval_ms=data.enforce_sync_interval_ms,
             epg_event=data.epg_event,
             auto_created=data.auto_created,
             auto_create_rule_id=data.auto_create_rule_id,
             match_by_tvg_id=match_by_tvg_id,
             enable_looping_detection=data.enable_looping_detection,
             enable_logo_detection=data.enable_logo_detection,
+            session_type=data.session_type,
         )
 
         return jsonify({"session_id": session_id, "message": "Session created successfully"}), 201
@@ -200,10 +206,13 @@ def create_group_stream_sessions_response(
                     pre_event_minutes=data.pre_event_minutes,
                     stagger_ms=data.stagger_ms,
                     timeout_ms=data.timeout_ms,
+                    evaluation_interval_ms=data.evaluation_interval_ms,
+                    enforce_sync_interval_ms=data.enforce_sync_interval_ms,
                     skip_stream_refresh=True,
                     match_by_tvg_id=match_by_tvg_id,
                     enable_looping_detection=data.enable_looping_detection,
                     enable_logo_detection=data.enable_logo_detection,
+                    session_type=data.session_type,
                 )
 
                 if session_manager.start_session(session_id):
@@ -262,46 +271,73 @@ def get_stream_session_response(
         if not session:
             return jsonify({"error": "Session not found"}), 404
 
-        from apps.database.connection import get_session as get_db_session
-        from apps.database.models import Run, StreamTelemetry
-        from apps.stream.stream_session_manager import StreamMetrics
-
         db_metrics_by_stream: Dict[int, list] = {}
-        db_session = get_db_session()
-        try:
-            telemetry_rows = (
-                db_session.query(StreamTelemetry, Run.timestamp)
-                .join(Run)
-                .filter(
-                    StreamTelemetry.channel_id == session.channel_id,
-                    Run.timestamp >= datetime.fromtimestamp(session.created_at),
-                )
-                .order_by(Run.timestamp.asc())
-                .all()
-            )
+        missing_history_ids = [
+            stream_id for stream_id, info in session.streams.items()
+            if not info.metrics_history
+        ]
+        if missing_history_ids:
+            from sqlalchemy import func
 
-            for row, ts in telemetry_rows:
-                metric = StreamMetrics(
-                    timestamp=ts.timestamp(),
-                    speed=0.0 if row.is_dead else 1.0,
-                    bitrate=row.bitrate_kbps or 0,
-                    fps=row.fps or 0.0,
-                    is_alive=not row.is_dead,
-                    buffering=False,
-                    reliability_score=row.quality_score or 50.0,
-                    status="stable" if not row.is_dead else "quarantined",
-                    status_reason=None,
-                    rank=None,
-                    loop_duration=None,
-                    display_logo_status="SUCCESS" if not row.is_dead else "PENDING",
+            from apps.database.connection import get_session as get_db_session
+            from apps.database.models import Run, StreamTelemetry
+            from apps.stream.stream_session_manager import StreamMetrics
+
+            db_session = get_db_session()
+            try:
+                # Run.timestamp is stored as naive UTC. Apply the incremental
+                # cursor in SQL and retrieve at most one chart window per stream.
+                # Active streams already have an in-memory window and need no DB
+                # lookup on every UI poll.
+                created_at = datetime.fromtimestamp(session.created_at, timezone.utc).replace(tzinfo=None)
+                ranked_query = (
+                    db_session.query(
+                        StreamTelemetry.id.label("telemetry_id"),
+                        Run.timestamp.label("metric_timestamp"),
+                        func.row_number().over(
+                            partition_by=StreamTelemetry.stream_id,
+                            order_by=(Run.timestamp.desc(), StreamTelemetry.id.desc()),
+                        ).label("history_rank"),
+                    )
+                    .join(Run)
+                    .filter(
+                        StreamTelemetry.channel_id == session.channel_id,
+                        StreamTelemetry.stream_id.in_(missing_history_ids),
+                        Run.timestamp >= created_at,
+                    )
                 )
-                if row.stream_id not in db_metrics_by_stream:
-                    db_metrics_by_stream[row.stream_id] = []
-                db_metrics_by_stream[row.stream_id].append(metric)
-        except Exception as exc:
-            logger.error(f"Error loading historical telemetry for session {session_id}: {exc}")
-        finally:
-            db_session.close()
+                if since_timestamp is not None:
+                    since_utc = datetime.fromtimestamp(since_timestamp, timezone.utc).replace(tzinfo=None)
+                    ranked_query = ranked_query.filter(Run.timestamp > since_utc)
+                ranked = ranked_query.subquery()
+                telemetry_rows = (
+                    db_session.query(StreamTelemetry, ranked.c.metric_timestamp)
+                    .join(ranked, ranked.c.telemetry_id == StreamTelemetry.id)
+                    .filter(ranked.c.history_rank <= 3600)
+                    .order_by(StreamTelemetry.stream_id, ranked.c.metric_timestamp.asc(), StreamTelemetry.id.asc())
+                    .all()
+                )
+
+                for row, ts in telemetry_rows:
+                    metric = StreamMetrics(
+                        timestamp=ts.replace(tzinfo=timezone.utc).timestamp(),
+                        speed=0.0 if row.is_dead else 1.0,
+                        bitrate=row.bitrate_kbps or 0,
+                        fps=row.fps or 0.0,
+                        is_alive=not row.is_dead,
+                        buffering=False,
+                        reliability_score=row.quality_score or 50.0,
+                        status="stable" if not row.is_dead else "quarantined",
+                        status_reason=None,
+                        rank=None,
+                        loop_duration=None,
+                        display_logo_status="SUCCESS" if not row.is_dead else "PENDING",
+                    )
+                    db_metrics_by_stream.setdefault(row.stream_id, []).append(metric)
+            except Exception as exc:
+                logger.error(f"Error loading historical telemetry for session {session_id}: {exc}")
+            finally:
+                db_session.close()
 
         streams_data = []
         if session.streams:
@@ -325,6 +361,13 @@ def get_stream_session_response(
                     "transport_health": getattr(stream_info, "transport_health", "Healthy"),
                     "transport_health_summary": getattr(stream_info, "transport_health_summary", ""),
                     "transport_error_density": getattr(stream_info, "transport_error_density", 0.0),
+                    "swarm_state": getattr(stream_info, "swarm_state", None),
+                    "peers": getattr(stream_info, "peers", None),
+                    "seeders": getattr(stream_info, "seeders", None),
+                    "download_kbps": getattr(stream_info, "download_kbps", None),
+                    "swarm_reliability": getattr(stream_info, "swarm_reliability", None),
+                    "keepup_margin": getattr(stream_info, "keepup_margin", None),
+                    "latency_secs": getattr(stream_info, "latency_secs", None),
                     "last_loop_time": getattr(stream_info, "last_loop_time", None),
                     "loop_duration": getattr(stream_info, "loop_duration", None),
                     "is_quarantined": stream_info.is_quarantined,
@@ -396,8 +439,11 @@ def get_stream_session_response(
             "stagger_ms": session.stagger_ms,
             "timeout_ms": session.timeout_ms,
             "probe_interval_ms": session.probe_interval_ms,
+            "evaluation_interval_ms": session.evaluation_interval_ms,
+            "enforce_sync_interval_ms": session.enforce_sync_interval_ms,
             "screenshot_interval_seconds": session.screenshot_interval_seconds,
             "window_size": session.window_size,
+            "session_type": getattr(session, "session_type", "ffmpeg"),
             "streams": streams_data,
             "ad_periods": session.ad_periods,
             "epg_event_id": session.epg_event_id,
@@ -427,7 +473,10 @@ def quarantine_stream_response(*, session_id: str, stream_id: int, get_session_m
             return (
                 jsonify(
                     {
-                        "error": "Failed to quarantine stream. It may already be quarantined or session/stream not found."
+                        "error": (
+                            "Could not complete quarantine. The stream or session may be missing, "
+                            "or Dispatcharr removal may be unconfirmed; refresh and retry."
+                        )
                     }
                 ),
                 400,
@@ -448,7 +497,10 @@ def revive_stream_response(*, session_id: str, stream_id: int, get_session_manag
             return (
                 jsonify(
                     {
-                        "error": "Failed to revive stream. It may not be quarantined or session not found."
+                        "error": (
+                            "Could not complete revival. The stream or session may be missing, "
+                            "or Dispatcharr assignment may be unconfirmed; refresh and retry."
+                        )
                     }
                 ),
                 400,

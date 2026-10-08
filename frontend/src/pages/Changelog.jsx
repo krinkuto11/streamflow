@@ -604,7 +604,7 @@ function AutomationChannel({ channel, cIdx }) {
       <div className="flex items-center gap-4">
         <div className="relative group">
           {channel.logo_url ? (
-            <img src={channel.logo_url} alt={channel.channel_name} className="w-10 h-10 object-contain rounded-lg bg-white dark:bg-card p-1 border shadow-sm group-hover:scale-110 transition-transform" />
+            <img src={channel.logo_url} alt={channel.channel_name} className="w-10 h-10 object-contain rounded-lg bg-white dark:bg-card p-1 border shadow-xs group-hover:scale-110 transition-transform" />
           ) : (
             <div className="w-10 h-10 rounded-lg bg-muted flex items-center justify-center text-xs font-bold border group-hover:scale-110 transition-transform">
               {channel.channel_name.substring(0, 2).toUpperCase()}
@@ -726,7 +726,7 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
               <div className="mr-2 inline-flex shrink-0 rounded-sm bg-current/10 p-1">
                 {getActionIcon(action)}
               </div>
-              <span className="min-w-0 break-words text-[11px] uppercase tracking-wider">{getActionLabel(action)}</span>
+              <span className="min-w-0 wrap-break-word text-[11px] uppercase tracking-wider">{getActionLabel(action)}</span>
             </Badge>
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -779,7 +779,7 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
                 className="min-w-0 max-w-full justify-start gap-1 whitespace-normal text-left leading-snug"
               >
                 <span className="shrink-0 text-[10px] uppercase tracking-tight text-muted-foreground">{item.label}</span>
-                <span className="min-w-0 break-words font-semibold">{item.value}</span>
+                <span className="min-w-0 wrap-break-word font-semibold">{item.value}</span>
               </Badge>
             ))}
           </div>
@@ -794,7 +794,7 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
                 className="min-w-0 max-w-full justify-start gap-1 whitespace-normal border-amber-500/70 bg-amber-500/10 text-left leading-snug text-amber-700 dark:text-amber-300"
               >
                 <span className="shrink-0 text-[10px] uppercase text-amber-800/80 dark:text-amber-200/80">{item.label}</span>
-                <span className="min-w-0 break-words font-semibold">{item.value}</span>
+                <span className="min-w-0 wrap-break-word font-semibold">{item.value}</span>
               </Badge>
             ))}
           </div>
@@ -889,7 +889,7 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
           <div className="pt-4 px-1">
             <Accordion type="multiple" className="w-full space-y-3">
               {details.periods.map((period, pIdx) => (
-                <AccordionItem key={pIdx} value={`period-${pIdx}`} className="border rounded-xl overflow-hidden bg-background shadow-sm border-muted/50">
+                <AccordionItem key={pIdx} value={`period-${pIdx}`} className="border rounded-xl overflow-hidden bg-background shadow-xs border-muted/50">
                   <AccordionTrigger className="hover:no-underline hover:bg-muted/30 px-5 py-4 transition-colors">
                     <div className="flex min-w-0 w-full flex-col gap-3 pr-4 sm:flex-row sm:items-center sm:justify-between">
                       <div className="flex min-w-0 items-center gap-4">
@@ -897,7 +897,7 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
                           {pIdx + 1}
                         </div>
                         <div className="flex min-w-0 flex-col items-start gap-0.5">
-                          <span className="min-w-0 break-words text-lg font-bold tracking-tight">{period.period_name}</span>
+                          <span className="min-w-0 wrap-break-word text-lg font-bold tracking-tight">{period.period_name}</span>
                           <span className="text-[10px] font-bold uppercase text-muted-foreground tracking-widest opacity-70">Automation Period</span>
                         </div>
                       </div>

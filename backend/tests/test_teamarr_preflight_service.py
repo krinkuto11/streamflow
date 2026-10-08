@@ -1197,7 +1197,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             "timestamp": "2026-05-28T22:25:00+00:00",
         })
 
-    def test_due_bucket_is_limited_to_poll_window(self):
+    def test_due_bucket_catches_up_after_crossing_poll_window(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(
             [make_event(event_date="2026-05-28T22:09:00+00:00")],
@@ -1208,10 +1208,9 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         result = service.run_once(force=True)
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["launched"], 0)
-        self.assertEqual(checker.calls, [])
+        self.assertEqual(result["launched"], 1)
         upcoming = service.get_status()["upcoming_events"]
-        self.assertEqual(upcoming[0]["state"], "scheduled")
+        self.assertEqual(upcoming[0]["trigger_bucket"], "10m")
 
     def test_pre_start_bucket_fires_inside_poll_window(self):
         checker = FakeChecker()
@@ -1403,9 +1402,9 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
 
     def test_missed_configured_post_start_bucket_catches_up_inside_grace(self):
         checker = FakeChecker()
-        event = make_event(event_date="2026-05-28T21:55:00+00:00")
+        event = make_event(event_date="2026-05-28T21:55:30+00:00")
         service, _, _ = self.make_service([event], checker=checker)
-        identity = "id:100:2026-05-28T21:55:00+00:00"
+        identity = "id:100:2026-05-28T21:55:30+00:00"
         service._attempted_buckets[f"{identity}:post+2m"] = FIXED_NOW
 
         result = service.run_once(force=True)
@@ -1710,6 +1709,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         service, _, _ = self.make_service([make_event()], http_get=Mock(side_effect=http_get))
 
         result = service.run_once(force=True)
+        service._filter_refresh_thread.join(timeout=2)
         self.assertTrue(result["success"])
 
         options = service.get_status()["filter_options"]
@@ -1721,6 +1721,28 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         league_labels = {item["value"]: item["label"] for item in options["leagues"]}
         self.assertEqual(league_labels["mlb"], "Major League Baseball")
         self.assertEqual(league_labels["uefa.europa"], "UEFA Europa League")
+
+    def test_stopped_catalog_read_cannot_publish_but_later_manual_refresh_can(self):
+        service, _, _ = self.make_service([])
+        entered, release = threading.Event(), threading.Event()
+        options = {"sports": [{"value": "soccer", "label": "Soccer"}], "leagues": [], "source": "teamarr_subscription"}
+
+        def blocked_catalog(*_args):
+            entered.set()
+            self.assertTrue(release.wait(timeout=2))
+            return options
+
+        service._build_filter_options = Mock(side_effect=blocked_catalog)
+        service._schedule_filter_refresh(service.get_config(include_secret=True), [])
+        self.assertTrue(entered.wait(timeout=2))
+        service.stop(persist=False)
+        release.set()
+        service._filter_refresh_thread.join(timeout=2)
+        self.assertNotEqual(service.get_status()["filter_options"]["source"], "teamarr_subscription")
+        service._build_filter_options = Mock(return_value=options)
+        service._schedule_filter_refresh(service.get_config(include_secret=True), [])
+        service._filter_refresh_thread.join(timeout=2)
+        self.assertEqual(service.get_status()["filter_options"], options)
 
     def test_filter_options_use_event_sport_when_subscription_league_catalog_is_unknown(self):
         event = make_event(sport="soccer", league="usa.usl.1")
@@ -1744,6 +1766,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         service, _, _ = self.make_service([event], http_get=Mock(side_effect=http_get))
 
         result = service.run_once(force=True)
+        service._filter_refresh_thread.join(timeout=2)
         self.assertTrue(result["success"])
 
         options = service.get_status()["filter_options"]

@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 class TestHTTPTimeout(unittest.TestCase):
     """Test that HTTP requests have timeout parameters."""
     
-    @patch('udi.fetcher.requests.get')
+    @patch('apps.core.http_transport.get')
     @patch('udi.fetcher.os.getenv')
     def test_udi_fetcher_fetch_url_has_timeout(self, mock_getenv, mock_get):
         """Test that UDI fetcher _fetch_url includes timeout parameter."""
@@ -47,7 +47,7 @@ class TestHTTPTimeout(unittest.TestCase):
         self.assertIsNotNone(call_kwargs['timeout'])
         self.assertGreater(call_kwargs['timeout'], 0, "Timeout should be positive")
     
-    @patch('api_utils.requests.get')
+    @patch('apps.core.http_transport.get')
     @patch('api_utils.os.getenv')
     def test_api_utils_fetch_data_has_timeout(self, mock_getenv, mock_get):
         """Test that api_utils fetch_data_from_url includes timeout parameter."""
@@ -74,7 +74,7 @@ class TestHTTPTimeout(unittest.TestCase):
         self.assertIsNotNone(call_kwargs['timeout'])
         self.assertGreater(call_kwargs['timeout'], 0, "Timeout should be positive")
     
-    @patch('api_utils.requests.patch')
+    @patch('apps.core.http_transport.patch')
     @patch('api_utils.os.getenv')
     def test_api_utils_patch_has_timeout(self, mock_getenv, mock_patch):
         """Test that api_utils patch_request includes timeout parameter."""
@@ -100,7 +100,7 @@ class TestHTTPTimeout(unittest.TestCase):
         self.assertIsNotNone(call_kwargs['timeout'])
         self.assertGreater(call_kwargs['timeout'], 0, "Timeout should be positive")
     
-    @patch('api_utils.requests.post')
+    @patch('apps.core.http_transport.post')
     @patch('api_utils.os.getenv')
     def test_api_utils_post_has_timeout(self, mock_getenv, mock_post):
         """Test that api_utils post_request includes timeout parameter."""

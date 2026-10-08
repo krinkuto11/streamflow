@@ -707,6 +707,7 @@ def test_mid_run_transient_outage_waits_for_recovery_before_marking_dead():
     service.connectivity_guard.check = Mock(side_effect=[ok, failed, ok])
 
     mock_udi = Mock()
+    mock_udi.refresh_channel_metadata.return_value = {'success': True, 'changed_stream_ids': []}
     mock_udi.get_channel_by_id.return_value = {
         "id": 42,
         "name": "Test Channel",
@@ -785,6 +786,7 @@ def test_mid_run_outage_does_not_mark_dead_or_update_channel():
     service.connectivity_guard.check = Mock(side_effect=[ok, failed])
 
     mock_udi = Mock()
+    mock_udi.refresh_channel_metadata.return_value = {'success': True, 'changed_stream_ids': []}
     mock_udi.get_channel_by_id.return_value = {
         "id": 42,
         "name": "Test Channel",

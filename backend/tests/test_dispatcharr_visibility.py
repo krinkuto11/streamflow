@@ -58,6 +58,7 @@ class TestDispatcharrVisibility(unittest.TestCase):
         session.streams[102] = review_stream
         
         self.mock_session_manager.get_session.return_value = session
+        self.mock_session_manager.get_session_owner.return_value = session.session_id
         
         # Mock UDI to return current streams (including both, as if they were there)
         mock_udi = MagicMock()
@@ -73,12 +74,13 @@ class TestDispatcharrVisibility(unittest.TestCase):
         
         # Verify update_channel_streams called with ONLY stable stream [101]
         mock_update_streams.assert_called_once()
-        args, _ = mock_update_streams.call_args
+        args, kwargs = mock_update_streams.call_args
         channel_id, new_order = args
         
         self.assertEqual(channel_id, 1)
         self.assertIn(101, new_order)
         self.assertNotIn(102, new_order)
+        self.assertEqual(kwargs['expected_current_stream_ids'], [101, 102])
         print(f"\n[PASS] Dispatcharr Update called with: {new_order} (Review stream 102 excluded)")
 
 if __name__ == '__main__':

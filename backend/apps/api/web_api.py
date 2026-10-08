@@ -30,6 +30,10 @@ from apps.core.api_utils import _get_base_url
 from apps.stream.stream_checker_service import get_stream_checker_service
 from apps.stream.shadow_blank_monitor_service import get_shadow_blank_monitor_service
 from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
+from apps.stream.playback_stability_service import get_playback_stability_service
+from apps.api.playback_stability_handlers import (
+    playback_stability_config_response, playback_stability_status_response,
+)
 from apps.automation.scheduling_service import get_scheduling_service
 from apps.background.scheduling_workers import (
     epg_refresh_processor_loop,
@@ -38,6 +42,7 @@ from apps.background.scheduling_workers import (
 )
 from apps.stream.udp_proxy import UDPProxyManager
 from apps.config.dispatcharr_config import get_dispatcharr_config
+from apps.config.openstream_config import get_openstream_config
 from apps.channels.channel_order_manager import get_channel_order_manager
 from apps.channels.repository import UdiChannelRepository
 from apps.channels.service import ChannelService
@@ -216,6 +221,11 @@ from apps.api.legacy_automation_handlers import (
     update_automation_profile_legacy_response,
     update_global_automation_settings_legacy_response,
 )
+from apps.api.openstream_handlers import (
+    get_openstream_config_response,
+    test_openstream_connection_response,
+    update_openstream_config_response,
+)
 from apps.api.dispatcharr_handlers import (
     get_dispatcharr_config_response,
     get_udi_initialization_status_response,
@@ -318,6 +328,8 @@ static_folder_local = Path(__file__).parent.parent.parent.parent / 'frontend' / 
 
 static_folder = static_folder_docker if static_folder_docker.exists() else static_folder_local
 app = Flask(__name__, static_folder=None)
+from apps.api.status_etags import install_status_etags
+install_status_etags(app)
 CORS(app)  # Enable CORS for React frontend
 
 
@@ -1403,6 +1415,29 @@ def test_dispatcharr_connection():
     return test_dispatcharr_connection_response(
         payload=request.get_json(silent=True),
         get_dispatcharr_config=get_dispatcharr_config,
+    )
+
+@app.route('/api/openstream/config', methods=['GET'])
+def get_openstream_config_endpoint():
+    """Get the OpenStream monitoring configuration (without the API key)."""
+    return get_openstream_config_response(
+        get_openstream_config=get_openstream_config,
+    )
+
+@app.route('/api/openstream/config', methods=['PUT'])
+def update_openstream_config_endpoint():
+    """Update the OpenStream API key / test URL."""
+    return update_openstream_config_response(
+        payload=request.get_json(silent=True),
+        get_openstream_config=get_openstream_config,
+    )
+
+@app.route('/api/openstream/test-connection', methods=['POST'])
+def test_openstream_connection():
+    """Test that an OpenStream server accepts the API key."""
+    return test_openstream_connection_response(
+        payload=request.get_json(silent=True),
+        get_openstream_config=get_openstream_config,
     )
 
 @app.route('/api/dispatcharr/initialization-status', methods=['GET'])
@@ -2554,6 +2589,18 @@ def create_session_from_event(event_id):
 
 # ==================== Settings API ====================
 
+@app.route('/api/playback-stability/config', methods=['GET', 'PUT'])
+def playback_stability_config():
+    return playback_stability_config_response(
+        method=request.method, payload=request.get_json(silent=True),
+        get_service=get_playback_stability_service,
+    )
+
+
+@app.route('/api/playback-stability/status', methods=['GET'])
+def playback_stability_status():
+    return playback_stability_status_response(get_service=get_playback_stability_service)
+
 @app.route('/api/settings/session', methods=['GET', 'POST'])
 def handle_session_settings():
     """Get or update session settings (like review duration)."""
@@ -2673,6 +2720,10 @@ if __name__ == '__main__':
                 except Exception:
                     pass
                     
+                try:
+                    get_playback_stability_service().stop()
+                except Exception:
+                    logger.exception('Failed to stop Playback Stability recorder')
                 logger.info("Graceful shutdown complete. Exiting.")
                 sys.exit(0)
 
@@ -2736,6 +2787,12 @@ if __name__ == '__main__':
             logger.info("Stream monitoring service auto-started")
         except Exception as e:
             logger.error(f"Failed to auto-start stream monitoring service: {e}")
+
+        try:
+            if check_wizard_complete():
+                get_playback_stability_service().start()
+        except Exception:
+            logger.exception('Failed to start Playback Stability recorder')
 
         try:
             if not check_wizard_complete():

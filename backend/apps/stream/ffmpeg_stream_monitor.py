@@ -197,6 +197,15 @@ class FFmpegStats:
     # Additional fields for bitrate calculation
     total_size: int = 0  # bytes
     start_time: float = 0.0
+    # OpenStream swarm telemetry (None for ffmpeg sessions). Populated by
+    # OpenStreamStreamMonitor from the server's session snapshot.
+    swarm_state: Optional[str] = None          # dead|warming|healthy|draining|stalled
+    peers: Optional[int] = None                # connected peers
+    seeders: Optional[int] = None              # peers actively feeding us
+    download_kbps: Optional[float] = None      # smoothed swarm download rate
+    reliability_score: Optional[float] = None  # server 0..1 EWMA rank key
+    keepup_margin: Optional[float] = None       # cursorRate/edgeRate (~1.0 = keeping up)
+    latency_secs: Optional[int] = None         # playback distance behind the live edge
 
 
 class FFmpegStreamMonitor:

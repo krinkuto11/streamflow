@@ -157,7 +157,7 @@ export function ChannelCard({
     <Card className="w-full">
       <CardContent className="p-0">
         <div className="flex items-center gap-3 p-3">
-          <div className="w-24 h-12 flex-shrink-0 bg-muted rounded-md flex items-center justify-center overflow-hidden">
+          <div className="w-24 h-12 shrink-0 bg-muted rounded-md flex items-center justify-center overflow-hidden">
             {logoUrl && !logoError ? (
               <img
                 src={logoUrl}
@@ -219,7 +219,7 @@ export function ChannelCard({
             </div>
           </div>
 
-          <div className="flex gap-2 flex-shrink-0">
+          <div className="flex gap-2 shrink-0">
             <Button variant="outline" size="sm" onClick={() => setExpanded(!expanded)}>
               <Edit className="h-4 w-4 mr-2" />
               Edit Regex

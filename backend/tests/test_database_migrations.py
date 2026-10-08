@@ -20,7 +20,7 @@ def test_versioned_migration_upgrades_legacy_runs_and_creates_backup(tmp_path):
         connection.close()
 
     engine = _engine(db_path)
-    assert run_migrations(engine, db_path) == [1]
+    assert run_migrations(engine, db_path) == [1, 2]
     assert run_migrations(engine, db_path) == []
 
     with engine.connect() as connection:
@@ -38,7 +38,7 @@ def test_versioned_migration_upgrades_legacy_runs_and_creates_backup(tmp_path):
         "job_subject_ref",
         "job_correlation_id",
     }.issubset(columns)
-    assert versions == [1]
+    assert versions == [1, 2]
     assert len(list(tmp_path.glob("legacy.db.pre-migration-*.bak"))) == 1
 
 

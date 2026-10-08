@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from flask import Flask
 from werkzeug.datastructures import MultiDict
@@ -76,6 +76,45 @@ def test_save_generic_telemetry_persists_v6_job_fields():
         assert run.job_outcome == "completed"
         assert run.job_subject_ref == "channel:456"
         assert run.job_correlation_id == "single-456"
+    finally:
+        session.close()
+
+
+def test_generic_telemetry_reuses_one_provider_snapshot_for_stream_rows():
+    udi = Mock()
+    udi.get_m3u_accounts.return_value = [
+        {"id": 7, "name": "Provider Seven"},
+        {"id": 8, "name": "Provider Eight"},
+    ]
+    with patch("apps.udi.get_udi_manager", return_value=udi):
+        save_generic_telemetry(
+            "single_channel_check",
+            {"channel_id": 456, "success": True},
+            subentries=[{
+                "group": "check",
+                "items": [{
+                    "channel_id": 456,
+                    "channel_name": "Provider snapshot fixture",
+                    "stats": {
+                        "total_streams": 2,
+                        "dead_streams": 0,
+                        "stream_details": [
+                            {"stream_id": 71, "m3u_account": "Provider Seven"},
+                            {"stream_id": 81, "m3u_account": 8},
+                        ],
+                    },
+                }],
+            }],
+        )
+
+    udi.get_m3u_accounts.assert_called_once_with()
+    session = get_session()
+    try:
+        run = session.query(Run).one()
+        health = session.query(ChannelHealth).one()
+        rows = session.query(StreamTelemetry).order_by(StreamTelemetry.stream_id).all()
+        assert health.run_id == run.id
+        assert [(row.stream_id, row.provider_id) for row in rows] == [(71, 7), (81, 8)]
     finally:
         session.close()
 

@@ -25,7 +25,8 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
     timeout_ms: 30000,
     autoStart: true,
     enable_looping_detection: true,
-    enable_logo_detection: true
+    enable_logo_detection: true,
+    session_type: 'ffmpeg'
   });
   const { toast } = useToast();
 
@@ -95,7 +96,7 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[850px]">
+      <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-[850px]">
         <DialogHeader>
           <DialogTitle>Create Monitoring Session</DialogTitle>
           <DialogDescription>
@@ -185,7 +186,7 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
                   <h4>Advanced Settings</h4>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="stagger" className="text-xs">Stagger (ms)</Label>
                     <Input
@@ -200,7 +201,7 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="sync_interval" className="text-xs">Sync Interval (ms)</Label>
+                    <Label htmlFor="sync_interval" className="text-xs">Enforcement tick (ms)</Label>
                     <Input
                       id="sync_interval"
                       type="number"
@@ -210,9 +211,12 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
                       onChange={(e) => handleChange('enforce_sync_interval_ms', parseInt(e.target.value))}
                       className="h-8 text-sm"
                     />
+                    <p className="text-xs text-muted-foreground">
+                      Checks session order at this interval. Changed order and stream status are written promptly; stable external changes are checked about every 15 seconds.
+                    </p>
                   </div>
 
-                  <div className="space-y-2 col-span-2">
+                  <div className="space-y-2 sm:col-span-2">
                     <Label htmlFor="timeout" className="text-xs">Stream Timeout (ms)</Label>
                     <Input
                       id="timeout"
@@ -227,8 +231,33 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
                 </div>
               </div>
 
-              {/* Detection Toggles */}
-              <div className="border rounded-lg p-4 space-y-4 bg-muted/20">
+              {/* Monitoring backend */}
+              <div className="space-y-2">
+                <Label htmlFor="session-type">Monitoring Backend</Label>
+                <Select
+                  value={formData.session_type}
+                  onValueChange={(value) => handleChange('session_type', value)}
+                >
+                  <SelectTrigger id="session-type">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ffmpeg">FFmpeg probe (default)</SelectItem>
+                    <SelectItem value="openstream">OpenStream swarm health</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {formData.session_type === 'openstream'
+                    ? 'AceStream sources: reliability comes from an OpenStream server (peer/keep-up health). No ffmpeg, screenshots or logo checks.'
+                    : 'Local ffmpeg probe with screenshot and logo verification.'}
+                </p>
+              </div>
+
+              {/* Detection Toggles (ffmpeg only — OpenStream has no decoded video) */}
+              <div
+                className="border rounded-lg p-4 space-y-4 bg-muted/20"
+                hidden={formData.session_type === 'openstream'}
+              >
                 <div className="flex items-center gap-2 text-sm font-medium mb-2">
                   <ShieldCheck className="h-4 w-4 text-primary" />
                   <h4>Detection Features</h4>

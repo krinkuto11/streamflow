@@ -63,13 +63,14 @@ class TestSingleChannelForceCheck(unittest.TestCase):
         # Mock AutomatedStreamManager
         mock_automation_instance = Mock()
         mock_automation_class.return_value = mock_automation_instance
+        mock_automation_instance.validate_and_remove_non_matching_streams = Mock(return_value={})
         mock_automation_instance.discover_and_assign_streams = Mock(return_value={})
         
         # Create service instance
         service = StreamCheckerService()
         
         # Mock _check_channel to avoid actual checking logic
-        service._check_channel = Mock()
+        service._check_channel = Mock(return_value={'dead_streams_count': 0, 'revived_streams_count': 0})
         
         # Call check_single_channel
         result = service.check_single_channel(channel_id=16)
@@ -125,6 +126,7 @@ class TestSingleChannelForceCheck(unittest.TestCase):
 
         mock_automation_instance = Mock()
         mock_automation_class.return_value = mock_automation_instance
+        mock_automation_instance.validate_and_remove_non_matching_streams = Mock(return_value={})
         mock_automation_instance.discover_and_assign_streams = Mock(return_value={})
 
         service = StreamCheckerService()
@@ -202,11 +204,12 @@ class TestSingleChannelForceCheck(unittest.TestCase):
         # Mock AutomatedStreamManager
         mock_automation_instance = Mock()
         mock_automation_class.return_value = mock_automation_instance
+        mock_automation_instance.validate_and_remove_non_matching_streams = Mock(return_value={})
         mock_automation_instance.discover_and_assign_streams = Mock(return_value={})
         
         # Create service instance
         service = StreamCheckerService()
-        service._check_channel = Mock()
+        service._check_channel = Mock(return_value={'dead_streams_count': 0, 'revived_streams_count': 0})
         
         # Call check_single_channel
         result = service.check_single_channel(channel_id=16)
@@ -263,11 +266,12 @@ class TestSingleChannelForceCheck(unittest.TestCase):
         # Mock AutomatedStreamManager instance
         mock_automation_instance = Mock()
         mock_automation_class.return_value = mock_automation_instance
+        mock_automation_instance.validate_and_remove_non_matching_streams = Mock(return_value={})
         mock_automation_instance.discover_and_assign_streams = Mock(return_value={'16': 5})
         
         # Create service instance
         service = StreamCheckerService()
-        service._check_channel = Mock()
+        service._check_channel = Mock(return_value={'dead_streams_count': 0, 'revived_streams_count': 0})
         
         # Call check_single_channel
         result = service.check_single_channel(channel_id=16)

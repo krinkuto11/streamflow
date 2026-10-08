@@ -6,6 +6,7 @@ Manages Automation Profiles and Global Automation Settings.
 Stores configuration in automation_config.json.
 """
 
+import copy
 import json
 import os
 import threading
@@ -37,7 +38,60 @@ class AutomationConfigManager:
         from apps.database.manager import get_db_manager
         self.db = get_db_manager()
         self._lock = RLock()
+        self._run_snapshot_context = threading.local()
         logger.info("AutomationConfigManager initialized with SQL backend")
+
+    def _active_run_snapshot(self) -> Optional[Dict[str, Any]]:
+        context = getattr(self, '_run_snapshot_context', None)
+        return getattr(context, 'snapshot', None) if context is not None else None
+
+    def begin_run_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Pin period assignments, periods and profiles for this run's thread.
+
+        The full run resolves the same channel configuration in several passes.
+        Read all inputs in one SQL session so those passes use one consistent
+        configuration and never open a session for every channel and period.
+        """
+        from apps.database.connection import get_session
+        from apps.database.models import AutomationPeriod, AutomationProfile, SystemSetting
+
+        session = get_session()
+        try:
+            setting_keys = ('channel_period_assignments', 'group_period_assignments')
+            settings = {
+                row.key: copy.deepcopy(row.value)
+                for row in session.query(SystemSetting)
+                .filter(SystemSetting.key.in_(setting_keys)).all()
+            }
+            assignments = {}
+            for key in setting_keys:
+                value = settings.get(key, {})
+                if not isinstance(value, dict):
+                    raise ValueError(f"Invalid automation configuration: {key} must be an object")
+                assignments[key] = value
+            periods = {
+                str(period.id): self._period_to_dict(period)
+                for period in session.query(AutomationPeriod).all()
+            }
+            profiles = {
+                str(profile.id): self._profile_to_dict(profile)
+                for profile in session.query(AutomationProfile).all()
+            }
+        finally:
+            session.close()
+
+        context = getattr(self, '_run_snapshot_context', None)
+        if context is None:
+            context = threading.local()
+            self._run_snapshot_context = context
+        previous = getattr(context, 'snapshot', None)
+        context.snapshot = {**assignments, 'periods': periods, 'profiles': profiles}
+        return previous
+
+    def end_run_snapshot(self, previous: Optional[Dict[str, Any]] = None) -> None:
+        context = getattr(self, '_run_snapshot_context', None)
+        if context is not None:
+            context.snapshot = previous
         
     def _create_default_profile(self):
         """Deprecated."""
@@ -363,6 +417,9 @@ class AutomationConfigManager:
             pid = int(profile_id)
         except (TypeError, ValueError):
             return None
+        snapshot = self._active_run_snapshot()
+        if snapshot is not None:
+            return copy.deepcopy(snapshot['profiles'].get(str(pid)))
         session = get_session()
         try:
             p = session.query(AutomationProfile).filter(AutomationProfile.id == pid).first()
@@ -706,6 +763,9 @@ class AutomationConfigManager:
             pid = int(period_id)
         except (TypeError, ValueError):
             return None
+        snapshot = self._active_run_snapshot()
+        if snapshot is not None:
+            return copy.deepcopy(snapshot['periods'].get(str(pid)))
         session = get_session()
         try:
             return self._period_to_dict(session.query(AutomationPeriod).get(pid))
@@ -890,6 +950,18 @@ class AutomationConfigManager:
 
         Group-level assignments are used as the base; channel-specific assignments override them.
         """
+        snapshot = self._active_run_snapshot()
+        if snapshot is not None:
+            effective: Dict[str, str] = {}
+            if group_id is not None:
+                group_periods = snapshot['group_period_assignments'].get(str(group_id), {})
+                if isinstance(group_periods, dict):
+                    effective.update(group_periods)
+            channel_periods = snapshot['channel_period_assignments'].get(str(channel_id), {})
+            if isinstance(channel_periods, dict):
+                effective.update(channel_periods)
+            return effective
+
         effective: Dict[str, str] = {}
         if group_id is not None:
             effective.update(self.get_group_periods(group_id))

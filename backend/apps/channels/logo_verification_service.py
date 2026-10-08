@@ -10,9 +10,10 @@ import cv2
 import numpy as np
 import imutils
 import logging
-import requests
 import threading
 from pathlib import Path
+
+from apps.channels.logo_cache import download_and_cache_logo, find_cached_logo
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +28,9 @@ def get_cached_logo_path(logo_id: int) -> str | None:
     if not logo_id:
         return None
         
-    logo_filename = f"logo_{logo_id}"
-    LOGOS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    
-    # Check if logo is already cached
-    for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']:
-        cached_path = LOGOS_CACHE_DIR / f"{logo_filename}{ext}"
-        if cached_path.exists():
-            return str(cached_path)
+    cached_path = find_cached_logo(LOGOS_CACHE_DIR, logo_id)
+    if cached_path is not None:
+        return str(cached_path)
             
     # Logo not cached, try to download it via UDI Manager logic
     try:
@@ -52,36 +48,8 @@ def get_cached_logo_path(logo_id: int) -> str | None:
         if not logo_url:
             return None
             
-        if logo_url.startswith('/'):
-            if not dispatcharr_base_url:
-                return None
-            logo_url = f"{dispatcharr_base_url}{logo_url}"
-            
-        if not logo_url.startswith(('http://', 'https://')):
-            return None
-            
-        logger.debug(f"Downloading missing logo {logo_id} from {logo_url}")
-        response = requests.get(logo_url, timeout=10, verify=True)
-        response.raise_for_status()
-        
-        # Determine strict extension
-        content_type = response.headers.get('content-type', '').lower()
-        ext = '.png'
-        if 'jpeg' in content_type or 'jpg' in content_type:
-            ext = '.jpg'
-        elif 'png' in content_type:
-            ext = '.png'
-        elif 'gif' in content_type:
-            ext = '.gif'
-        elif 'webp' in content_type:
-            ext = '.webp'
-        elif 'svg' in content_type:
-            ext = '.svg'
-            
-        cached_path = LOGOS_CACHE_DIR / f"{logo_filename}{ext}"
-        with open(cached_path, 'wb') as f:
-            f.write(response.content)
-            
+        logger.debug("Downloading missing logo %s", logo_id)
+        cached_path = download_and_cache_logo(LOGOS_CACHE_DIR, logo_id, logo_url, dispatcharr_base_url)
         return str(cached_path)
     except Exception as e:
         logger.error(f"Failed to fetch cache missing logo {logo_id}: {e}")
