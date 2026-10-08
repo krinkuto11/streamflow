@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Any, Set
 import requests
 from apps.core import http_transport
+from apps.core.retry_after import retry_after_seconds
 
 from apps.core.logging_config import setup_logging, log_api_request, log_api_response
 from apps.config.dispatcharr_config import get_dispatcharr_config
@@ -360,11 +361,7 @@ class UDIFetcher:
                     success=resp.status_code < 400,
                 )
 
-                resp.raise_for_status()
-                return resp.json()
-            except requests.exceptions.HTTPError as e:
-                status_code = e.response.status_code if e.response is not None else None
-                if status_code == 401:
+                if resp.status_code == 401:
                     if _refresh_token():
                         logger.info("Retrying request with new token...")
                         retry_start = time.monotonic()
@@ -377,16 +374,20 @@ class UDIFetcher:
                             status_code=resp.status_code,
                             success=resp.status_code < 400,
                         )
-                        resp.raise_for_status()
-                        return resp.json()
-
+                resp.raise_for_status()
+                return resp.json()
+            except requests.exceptions.HTTPError as e:
+                status_code = e.response.status_code if e.response is not None else None
                 retryable = status_code in {429, 500, 502, 503, 504}
                 if retryable and attempt < GET_RETRY_ATTEMPTS:
+                    delay = retry_after_seconds(e.response) if status_code in {429, 503} else None
+                    if delay is None:
+                        delay = GET_RETRY_BACKOFF_SECONDS * attempt
                     logger.warning(
                         f"Transient HTTP {status_code} fetching {url}; retrying "
-                        f"({attempt}/{GET_RETRY_ATTEMPTS})"
+                        f"({attempt}/{GET_RETRY_ATTEMPTS}) after {delay:g} seconds"
                     )
-                    time.sleep(GET_RETRY_BACKOFF_SECONDS * attempt)
+                    time.sleep(delay)
                     continue
                 logger.error(f"Error fetching {url}: {e}")
                 return None
