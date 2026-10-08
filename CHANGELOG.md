@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **GitHub Actions maintenance (#486–488)** - Update Python setup to v7, Docker image builds to build-push-action v7, and Docker layer caching to cache v6. Preserve the application runtimes, cache paths, image tags, and publication rules.
 - **Project overview and setup documentation** - Refresh README badges, stable/development image guidance, current features, verified setting locations and example-data screenshots. Document the required Compose `.env` file and persistent volume; mention Dispatcharr's Unraid store availability without a link or installation instructions. Include the stable 2.7.0 release notes linked from the overview.
 - **Reviewed dependency updates (#473–480)** - Update frontend runtime/tooling, Recharts 3, Lucide 1, and GitHub checkout/container actions together. Upgrade React, React DOM and both React type packages as a compatible React 19 family, and group future React updates to avoid partial major upgrades.
 
