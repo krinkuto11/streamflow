@@ -54,10 +54,10 @@
     "@types/node": "^22.10.1",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
-    "@vitejs/plugin-react": "^6.0.1",
-    "postcss": "^8.5.23",
+    "@vitejs/plugin-react": "^6.1.2",
+    "postcss": "^8.5.29",
     "tailwindcss": "^4.3.3",
-    "vite": "^8.1.4",
+    "vite": "^8.3.2",
     "vitest": "^4.1.0"
   }
 }
