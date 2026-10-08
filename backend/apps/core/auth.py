@@ -10,6 +10,7 @@ imports (fetcher ← manager ← api_utils, both of which depend on auth).
 """
 
 import json
+import hashlib
 import os
 import threading
 import time
@@ -21,6 +22,7 @@ from dotenv import load_dotenv, set_key
 
 from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.core.logging_config import setup_logging, log_api_request, log_api_response
+from apps.core.retry_after import retry_after_seconds
 
 logger = setup_logging(__name__)
 
@@ -38,7 +40,11 @@ TOKEN_VALIDATION_TTL = int(os.getenv("TOKEN_VALIDATION_TTL", "60"))
 
 # Serialises concurrent token-refresh calls so a burst of 401 responses
 # only triggers one login() and one .env write.
-_token_refresh_lock = threading.Lock()
+_token_refresh_lock = threading.RLock()
+_login_retry_key: Optional[str] = None
+_login_retry_deadline = 0.0
+_login_generation = 0
+LOGIN_RETRY_BACKOFF_SECONDS = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +114,29 @@ def _clear_token_validation_cache() -> None:
 
 
 def _login() -> bool:
+    """Serialize logins and honor a shared cooldown for these credentials."""
+    global _login_retry_key, _login_retry_deadline, _login_generation
+    with _token_refresh_lock:
+        config = get_dispatcharr_config()
+        if config.get_auth_mode() == 'api_key':
+            return _login_once()
+        identity = (config.get_base_url(), config.get_username(), config.get_password())
+        key = hashlib.sha256(repr(identity).encode('utf-8')).hexdigest()
+        if key != _login_retry_key:
+            _login_retry_key = key
+            _login_retry_deadline = 0.0
+        wait = max(0.0, _login_retry_deadline - time.monotonic())
+        if wait:
+            logger.info('Waiting %.1f seconds before retrying throttled Dispatcharr login', wait)
+            time.sleep(wait)
+        success = _login_once()
+        if success:
+            _login_retry_deadline = 0.0
+            _login_generation += 1
+        return success
+
+
+def _login_once() -> bool:
     """Authenticate with Dispatcharr and persist the token.
 
     Returns True on success, False on any failure.
@@ -160,6 +189,14 @@ def _login() -> bool:
         return False
 
     except requests.exceptions.RequestException as e:
+        if e.response is not None and e.response.status_code == 429:
+            global _login_retry_deadline
+            delay = retry_after_seconds(e.response)
+            if delay is None:
+                delay = LOGIN_RETRY_BACKOFF_SECONDS
+            _login_retry_deadline = time.monotonic() + delay
+            logger.warning('Dispatcharr login throttled; next login deferred for %.1f seconds', delay)
+            return False
         if hasattr(e, "response") and e.response is not None:
             logger.error(f"Login request failed: {e} — {e.response.text}")
         else:
@@ -218,11 +255,16 @@ def _get_auth_headers() -> Dict[str, str]:
 
 def _refresh_token() -> bool:
     """Refresh the token, serialised so only one thread runs login() at a time."""
+    observed_generation = _login_generation
     with _token_refresh_lock:
         config = get_dispatcharr_config()
         if config.get_auth_mode() == "api_key":
             logger.info("Dispatcharr API key auth is configured; token refresh is not available.")
             return False
+
+        # A caller waiting behind a completed refresh can reuse its token.
+        if _login_generation != observed_generation and os.getenv('DISPATCHARR_TOKEN'):
+            return True
 
         logger.info("Token expired or invalid — refreshing...")
         if _login():
