@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import AbstractSet, Callable, Dict, Iterable, List, Optional, Tuple, Any, Union
 import concurrent.futures
 from collections import defaultdict, deque
+from apps.automation.regex_composition import combine_regex_patterns
 
 # Pre-compiled regex pattern for whitespace conversion (performance optimization)
 # This pattern matches one or more spaces that are NOT preceded by a backslash
@@ -1314,10 +1315,7 @@ class RegexChannelMatcher:
         if len(pattern_strings) == 1:
             return pattern_strings[0]
         
-        # Combine multiple patterns with OR
-        # Each pattern is wrapped in a non-capturing group for safety
-        combined = '|'.join(f'(?:{p})' for p in pattern_strings)
-        return f'({combined})'
+        return combine_regex_patterns(pattern_strings)
 
     def get_channel_match_config(self, channel_id: str, group_id: Optional[Union[str, int]] = None) -> Dict[str, Any]:
         """Get the matching configuration for a channel.

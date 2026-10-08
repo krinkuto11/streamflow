@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Dispatcharr throttle handling (#454)** - UDI GET retries honor numeric/date `Retry-After` and Django REST Framework throttle hints. Credential logins share a serialized cooldown, including direct login calls, and concurrent waiting refreshes can reuse the refreshed token. API-key authentication retains its existing flow.
+- **Monitoring regex composition (#379)** - Multiple channel patterns with leading Python inline flags now scope those flags to their own alternatives instead of failing compilation. Single patterns, stored rules, branch order, and the regular provider-aware matching path retain their existing behavior.
 
 ### Added
 - **Matrix appearance** - Additional black/charcoal palette with green accents in the appearance menu; retains semantic status colors and the existing layouts. See [theme details](docs/matrix-theme.md).
