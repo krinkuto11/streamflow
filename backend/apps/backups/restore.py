@@ -140,6 +140,9 @@ def apply_pending_restore(config_dir, backup_dir=None):
                     content['is_active'] = False
                     db.execute('UPDATE monitoring_sessions SET pid=NULL, raw_info=? WHERE session_id=?', (json.dumps(content), identity))
                 db.execute("UPDATE monitoring_sessions SET status='stopped' WHERE stream_id IS NULL")
+                # SQL is authoritative in this archive. Older compatibility JSON
+                # must not overwrite restored regex rules or connection settings.
+                db.execute("INSERT OR REPLACE INTO system_settings (key,value) VALUES ('backup_restore_sql_authoritative','true')")
                 db.commit()
             new_files = {'streamflow.db': restored_db}
             for path in (incoming / 'config').glob('*.json'):

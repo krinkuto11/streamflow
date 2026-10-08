@@ -645,6 +645,10 @@ def main():
     total_rows_written = 0
 
     try:
+        restored = session.query(SystemSetting).filter(SystemSetting.key == 'backup_restore_sql_authoritative').first()
+        if restored is not None and restored.value is True:
+            logger.info('Restored SQL configuration is authoritative; skipping legacy JSON imports.')
+            return
         source_dirs = [
             CONFIG_DIR,
             backend_dir.parent / 'old',

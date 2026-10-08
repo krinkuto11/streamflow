@@ -188,7 +188,7 @@ def test_restore_round_trip_replaces_json_recovery_copies_and_creates_safety(per
     restore.stage_restore(persistent,path)
     result = restore.apply_pending_restore(persistent)
     assert result['status']=='restored'
-    assert rows(persistent/'streamflow.db','system_settings') == before
+    assert [row for row in rows(persistent/'streamflow.db','system_settings') if row[0]!='backup_restore_sql_authoritative'] == before
     with closing(sqlite3.connect(persistent/'streamflow.db')) as db:
         assert db.execute('SELECT pid FROM monitoring_sessions').fetchone()[0] is None
         assert json.loads(db.execute('SELECT raw_info FROM monitoring_sessions').fetchone()[0])['is_active'] is False
@@ -462,3 +462,22 @@ def test_related_database_settings_commit_atomically(clean_test_db,monkeypatch):
     monkeypatch.setattr(manager,'_get_session',real)
     assert manager.get_system_setting('backup_config')=={'retention':7}
     assert manager.get_system_setting('backup_schedule_state') is None
+
+
+def test_legacy_json_import_cannot_overwrite_restored_sql(persistent,monkeypatch):
+    import importlib.util
+    from sqlalchemy.orm import sessionmaker
+    spec=importlib.util.spec_from_file_location('backup_migration_test',Path(__file__).parents[1]/'scripts/migrate_to_sql.py')
+    migration=importlib.util.module_from_spec(spec);spec.loader.exec_module(migration)
+    path=make(persistent);restore.stage_restore(persistent,path)
+    assert restore.apply_pending_restore(persistent)['status']=='restored'
+    # Stale files can remain for compatibility, but they must not replace SQL.
+    (persistent/'dispatcharr_config.json').write_text('{"api_key":"stale-key"}')
+    (persistent/'channel_regex_config.json').write_text('{"patterns":{"1":{"name":"wrong","regex_patterns":[]}}}')
+    engine=create_engine(f'sqlite:///{persistent / "streamflow.db"}')
+    monkeypatch.setattr(migration,'init_db',lambda:None)
+    monkeypatch.setattr(migration,'get_session',sessionmaker(bind=engine))
+    monkeypatch.setattr(migration,'CONFIG_DIR',persistent)
+    migration.main();engine.dispose()
+    assert 'private-test-key' in dict(rows(persistent/'streamflow.db','system_settings'))['dispatcharr_config']
+    assert len(rows(persistent/'streamflow.db','channel_regex_patterns'))==1
