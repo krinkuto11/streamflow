@@ -152,7 +152,7 @@ def rewrite_configuration(db, root, mappings, *, foreign):
     for identity, channel, pattern, raw, order in patterns:
         target = mappings['channels'].get(identifier(channel))
         providers = json.loads(raw) if raw else None
-        rewritten = [mappings['providers'][p] for p in providers if mappings['providers'].get(p) is not None] if providers else providers
+        rewritten = [mappings['providers'][identifier(p)] for p in providers if mappings['providers'].get(identifier(p)) is not None] if providers else providers
         if target is not None and not (providers and not rewritten):
             db.execute('INSERT INTO channel_regex_patterns VALUES (?,?,?,?,?)', (identity, str(target), pattern, json.dumps(rewritten) if rewritten is not None else None, order))
     if foreign:

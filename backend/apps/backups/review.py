@@ -130,6 +130,22 @@ def mapping_context(root, source, current, mappings):
     mappings['channel_uuids'] = {row['uuid']: target_by_id['channels'][target].get('uuid') or None
                                for row in source['channels'] if row.get('uuid')
                                and (target := mappings['channels'].get(row['id'])) in target_by_id['channels']}
+    # Legacy UUID filters still prove identity when that UUID exists uniquely
+    # on the destination. A skipped known source assignment must stay skipped.
+    current_uuids = {}
+    for row in current['channels']:
+        if row.get('uuid'):
+            current_uuids[row['uuid']] = current_uuids.get(row['uuid'], 0) + 1
+    for row in source['channels']:
+        if row.get('uuid') and row['id'] in mappings['channels']:
+            mappings['channel_uuids'].setdefault(row['uuid'], None)
+    with closing(sqlite3.connect(root / 'streamflow.db')) as db:
+        def preserve_uuid(kind, value):
+            if kind == 'channel_uuids' and value not in mappings['channel_uuids']:
+                mappings['channel_uuids'][value] = value if current_uuids.get(value) == 1 else None
+            return value
+        for origin, key, value in configuration_records(db, root):
+            visit(value, str(key).removesuffix('.json'), preserve_uuid)
     foreign = not (root / INVENTORY_FILE).exists() or any(target != old or (kind in ('providers','channels') and not same_identity(source_by_id[kind].get(old, {}), target_by_id[kind].get(target, {})))
                   for kind in KINDS[:-1] for old, target in mappings[kind].items())
     # Monitoring snapshots embed stream IDs as well as channel/provider IDs.
@@ -143,7 +159,9 @@ def preview_mappings(root, source, current, mappings):
     counts = {}
     with closing(sqlite3.connect(Path(root) / 'streamflow.db')) as db:
         # Validate scopes before offering confirmation; this path never writes.
-        list(configuration_rewrites(db, Path(root), mappings))
+        rewrites = list(configuration_rewrites(db, Path(root), mappings))
+        disabled_scopes = sum(disable or (isinstance(value, dict) and value.get('enabled') is False)
+                              for origin, key, value, disable in rewrites)
         for table in ('stream_telemetry', 'playback_observations'):
             fields = 'channel_id,stream_id' + (',source_fingerprint' if table == 'playback_observations' else '')
             rows = db.execute(f'SELECT {fields} FROM {table}').fetchall()
@@ -151,7 +169,7 @@ def preview_mappings(root, source, current, mappings):
                        (table != 'playback_observations' or row[2] == source_by_id['streams'].get(row[1], {}).get('identity')) for row in rows)
             counts[table] = {'kept': kept, 'removed': len(rows) - kept}
     return {'foreign': foreign, 'history': counts, 'skipped_assignments': sum(target is None for kind in KINDS[:-1] for target in mappings[kind].values()),
-            'monitoring_history_kept': not foreign}
+            'monitoring_history_kept': not foreign, 'disabled_configurations': disabled_scopes}
 
 
 def apply_mappings(root, source, current, mappings):

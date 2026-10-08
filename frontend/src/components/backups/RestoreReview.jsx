@@ -89,6 +89,7 @@ export default function RestoreReview({ review, disabled, run, onRestart, error 
         {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
         {preview && <div className="space-y-3 text-sm">
           <p>Skipped assignments: {preview.skipped_assignments}</p>
+          <p>Configurations with an off or disabled scope after remapping: {preview.disabled_configurations || 0}</p>
           {Object.entries(preview.history).map(([key, value]) => <p key={key}>{key === 'stream_telemetry' ? 'Quality measurements' : 'Playback observations'}: {value.kept} kept · {value.removed} removed because identity is unverified.</p>)}
           <p>{preview.monitoring_history_kept ? 'Verified monitoring snapshots remain stopped.' : 'Monitoring snapshots and cached session references are removed because identifiers or identities changed.'}</p>
           <p>The original backup remains available for download.</p>

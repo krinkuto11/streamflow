@@ -297,3 +297,25 @@ def test_complete_fetch_checks_unique_ids_and_requests_stable_order(monkeypatch)
     assert all('ordering=id' in url for url in requested if 'page=' in url)
     monkeypatch.setattr(UDIFetcher,'fetch_all_ids',lambda self:{'channels':{1},'streams':{2,3}})
     with pytest.raises(ValueError,match='incomplete'):fetch_inventory()
+
+
+@pytest.mark.parametrize('legacy,skip,expected', [(False,False,['channel-a']), (True,False,['channel-a']), (False,True,[])])
+def test_uuid_filters_preserve_proof_and_respect_explicit_skip(persistent,inventory,legacy,skip,expected):
+    with closing(sqlite3.connect(persistent/'streamflow.db')) as db:
+        db.execute('INSERT INTO system_settings VALUES (?,?)', ('shadow_blank_monitor_config',json.dumps({'enabled':True,'included_channel_uuids':['channel-a']})));db.commit()
+    if legacy:(persistent/INVENTORY_FILE).unlink()
+    mappings=plan()
+    if skip:mappings['channels']['1']=None
+    preview=preview_mappings(persistent,load_source(persistent),inventory,mappings)
+    apply_mappings(persistent,load_source(persistent),inventory,mappings)
+    value=json.loads(dict(rows(persistent/'streamflow.db','system_settings'))['shadow_blank_monitor_config'])
+    assert value['included_channel_uuids']==expected and value['enabled'] is (not skip)
+    if skip:assert preview['disabled_configurations']>0
+
+
+def test_legacy_string_provider_identifiers_preserve_regex_restrictions(persistent,inventory):
+    with closing(sqlite3.connect(persistent/'streamflow.db')) as db:
+        db.execute('UPDATE channel_regex_patterns SET m3u_accounts=?', ('["5", "9"]',));db.commit()
+    apply_mappings(persistent,inventory,inventory,plan())
+    with closing(sqlite3.connect(persistent/'streamflow.db')) as db:
+        assert json.loads(db.execute('SELECT m3u_accounts FROM channel_regex_patterns').fetchone()[0])==[5,9]
