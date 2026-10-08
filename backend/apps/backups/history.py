@@ -101,5 +101,8 @@ def restore_monitoring_history(manager, config_dir):
                 target = session.streams.get(stream['id'])
                 if target is not None:
                     target.metrics_history = deque((StreamMetrics(**metric) for metric in stream['metrics']), maxlen=3600)
+        # Timelines remain in memory as before. Consume the restore snapshot so
+        # an ordinary later restart cannot inject measurements from an old run.
+        path.unlink()
     except (ValueError, TypeError, OSError, KeyError):
         logger.warning('Ignoring an invalid restored monitoring timeline')

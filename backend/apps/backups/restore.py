@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from apps.core.atomic_json import atomic_write_json
-from apps.backups.archive import config_files, create_archive, extract_validated, read_json, snapshot_database
+from apps.backups.archive import config_files, create_archive, extract_validated, read_json, snapshot_database, sync_directory
 
 logger = logging.getLogger(__name__)
 PENDING = '.restore-pending.json'
@@ -44,6 +44,7 @@ def _replace(source, target):
         with open(temporary, 'r+b') as handle:
             os.fsync(handle.fileno())
         os.replace(temporary, target)
+        sync_directory(target.parent)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -113,7 +114,9 @@ def apply_pending_restore(config_dir, backup_dir=None):
             database_summary(incoming / 'streamflow.db')
             backup_dir = Path(backup_dir or os.environ.get('BACKUP_DIR', str(root / 'backups'))).resolve()
             history_path = root / 'monitoring_history.json'
+            version_file = Path(__file__).resolve().parents[2] / 'version.txt'
             safety = create_archive(root, backup_dir, kind='safety',
+                                    version=version_file.read_text().strip() if version_file.is_file() else 'unknown',
                                     monitoring_history=read_json(history_path) if history_path.is_file() else None)
             result['safety_backup'] = safety['name']
             safety_files = sorted(backup_dir.glob('streamflow-safety-*.zip'), reverse=True)

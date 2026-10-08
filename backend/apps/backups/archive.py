@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import stat
 import tempfile
+import time
 import uuid
 import zipfile
 from contextlib import closing
@@ -92,9 +93,13 @@ def database_summary(path):
 def snapshot_database(source, target, *, include_history=True):
     if not source.is_file() or source.is_symlink():
         raise ValueError('The StreamFlow database is unavailable')
+    deadline = time.monotonic() + 90
+    def progress(status, remaining, total):
+        if time.monotonic() > deadline:
+            raise TimeoutError('The database was too busy to finish its backup')
     with closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True, timeout=30)) as src:
         with closing(sqlite3.connect(target)) as dst:
-            src.backup(dst, pages=256, sleep=0.01)
+            src.backup(dst, pages=256, sleep=0.01, progress=progress)
             if not include_history:
                 tables = {r[0] for r in dst.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 for table in HISTORY_TABLES:
@@ -113,6 +118,18 @@ def archive_path(directory, name):
     if path.is_symlink() or path.resolve().parent != directory:
         raise ValueError('Invalid backup path')
     return path
+
+
+def sync_directory(path):
+    """Make a completed rename durable on platforms with directory fsync."""
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY)
+    except (AttributeError, OSError):
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def create_archive(config_dir, backup_dir, *, include_history=True, monitoring_history=None,
@@ -173,6 +190,7 @@ def create_archive(config_dir, backup_dir, *, include_history=True, monitoring_h
             with temporary.open('r+b') as handle:
                 os.fsync(handle.fileno())
             os.replace(temporary, final)
+            sync_directory(backup_dir)
         return {'name': name, 'size': final.stat().st_size, **manifest}
     finally:
         temporary.unlink(missing_ok=True)

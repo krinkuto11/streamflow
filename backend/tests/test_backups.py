@@ -246,6 +246,7 @@ def test_monitoring_snapshot_is_bounded_and_only_hydrates_stopped_sessions(tmp_p
     stream.metrics_history.clear(); restore_monitoring_history(manager,tmp_path)
     assert len(stream.metrics_history)==1000 and stream.metrics_history[0].timestamp==200
     stream.metrics_history.clear(); session.is_active=True
+    (tmp_path/'monitoring_history.json').write_text(json.dumps(payload))
     restore_monitoring_history(manager,tmp_path); assert not stream.metrics_history
 
 
@@ -372,3 +373,89 @@ def test_http_upload_download_preview_confirmation_and_private_metadata(persiste
     assert client.post('/api/backups/upload',data={'file':(io.BytesIO(b'bad'),'bad.zip')}).status_code==400
     assert client.post('/api/backups',json={'include_history':False}).status_code==202
     assert finish(svc)['state']=='completed'
+
+
+def test_failed_rollback_keeps_journal_and_blocks_startup(persistent, monkeypatch):
+    path=make(persistent); restore.stage_restore(persistent,path)
+    original=restore._replace
+    def fail(source,target):
+        if target.parent==persistent: raise OSError('storage unavailable')
+        original(source,target)
+    monkeypatch.setattr(restore,'_replace',fail)
+    with pytest.raises(OSError): restore.apply_pending_restore(persistent)
+    assert json.loads((persistent/restore.PENDING).read_text())['phase']=='applying'
+    monkeypatch.setattr(restore,'_replace',original)
+    assert restore.apply_pending_restore(persistent)['status']=='rolled_back'
+
+
+def test_newer_database_schema_rejected_even_with_valid_checksums(persistent, tmp_path):
+    with closing(sqlite3.connect(persistent/'streamflow.db')) as db:
+        db.execute("INSERT INTO schema_migrations (version,name,applied_at) VALUES (999,'future','2026-10-08')");db.commit()
+    with pytest.raises(ValueError,match='newer StreamFlow'): make(persistent)
+
+
+def test_configuration_change_during_snapshot_is_retried(persistent, monkeypatch, tmp_path):
+    original=archive.snapshot_database; calls=[]
+    def changed(*args,**kwargs):
+        original(*args,**kwargs);calls.append(1)
+        if len(calls)==1: (persistent/'teamarr_preflight_config.json').write_text('{"changed":true}')
+    monkeypatch.setattr(archive,'snapshot_database',changed)
+    path=make(persistent)
+    archive.extract_validated(path,tmp_path/'extract')
+    assert len(calls)==2
+    assert json.loads((tmp_path/'extract/config/teamarr_preflight_config.json').read_text())=={'changed':True}
+
+
+def test_busy_race_cancels_restore_and_restarts_previous_state(persistent):
+    path=make(persistent); reasons=[]; restarted=[]
+    svc=service(persistent,busy_reasons=lambda:reasons,
+                stop_runtime=lambda:reasons.append('stream checks'),restart=lambda:restarted.append(True))
+    svc.restore(path.name)
+    assert finish(svc)['state']=='failed' and restarted==[True]
+    assert not (persistent/restore.PENDING).exists()
+    assert json.loads((persistent/restore.RESULT).read_text())['finished_at']
+
+
+def test_storage_failure_releases_import_lock(persistent, monkeypatch):
+    svc=service(persistent)
+    original=Path.mkdir
+    def fail(path,*args,**kwargs):
+        if path==svc.backup_dir: raise PermissionError('read only')
+        return original(path,*args,**kwargs)
+    monkeypatch.setattr(Path,'mkdir',fail)
+    with pytest.raises(PermissionError): svc.import_backup(io.BytesIO(b'anything'))
+    assert not svc._operation_lock.locked()
+
+
+def test_restore_safety_retention_is_separate(persistent):
+    path=make(persistent)
+    for _ in range(4):
+        restore.stage_restore(persistent,path)
+        assert restore.apply_pending_restore(persistent)['status']=='restored'
+    assert len(list((persistent/'backups').glob('streamflow-safety-*.zip')))==3
+    assert path.exists()
+
+
+def test_api_maintenance_gate_blocks_mutations_without_hiding_status(persistent,monkeypatch):
+    from apps.api.web_api import app
+    from apps.backups import service as module
+    svc=service(persistent);svc.maintenance=True
+    monkeypatch.setattr(module,'_service',svc)
+    client=app.test_client()
+    assert client.post('/api/automation/trigger',json={}).status_code==503
+    assert client.get('/api/backups').status_code==200
+
+
+def test_related_database_settings_commit_atomically(clean_test_db,monkeypatch):
+    from apps.database.manager import get_db_manager
+    manager=get_db_manager();assert manager.set_system_setting('backup_config',{'retention':7})
+    real=manager._get_session
+    def broken():
+        session=real()
+        monkeypatch.setattr(session,'commit',lambda:(_ for _ in ()).throw(RuntimeError('test failure')))
+        return session
+    monkeypatch.setattr(manager,'_get_session',broken)
+    assert manager.set_system_settings_multi({'backup_config':{'retention':2},'backup_schedule_state':{'next_run_at':5}}) is False
+    monkeypatch.setattr(manager,'_get_session',real)
+    assert manager.get_system_setting('backup_config')=={'retention':7}
+    assert manager.get_system_setting('backup_schedule_state') is None

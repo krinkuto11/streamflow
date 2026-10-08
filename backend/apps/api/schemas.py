@@ -20,6 +20,20 @@ class BackupCreateRequest:
 
 
 @dataclass
+class BackupConfigRequest:
+    settings: Dict[str, Any]
+
+    @classmethod
+    def from_payload(cls, payload):
+        from apps.backups.schedule import validate_config
+        try:
+            validate_config(payload)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from None
+        return cls(settings=payload)
+
+
+@dataclass
 class BackupRestoreRequest:
     confirm: bool
 

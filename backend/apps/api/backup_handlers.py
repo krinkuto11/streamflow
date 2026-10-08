@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from flask import Blueprint, request, send_file
 from werkzeug.exceptions import RequestEntityTooLarge
 
-from apps.api.schemas import BackupCreateRequest, BackupRestoreRequest
+from apps.api.schemas import BackupConfigRequest, BackupCreateRequest, BackupRestoreRequest
 from apps.backups.archive import MAX_ARCHIVE_BYTES, archive_path
 from apps.backups.service import BackupBusyError
 from apps.core.api_responses import error_response, success_response
@@ -57,7 +57,8 @@ def create_backup_blueprint(service_provider):
     @blueprint.put('/config')
     @handled
     def config():
-        return success_response(service_provider().update_config(request.get_json(silent=True)))
+        payload = BackupConfigRequest.from_payload(request.get_json(silent=True))
+        return success_response(service_provider().update_config(payload.settings))
 
     @blueprint.post('')
     @handled

@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from apps.backups.archive import (MAX_ARCHIVE_BYTES, NAME_RE, archive_path, create_archive,
@@ -200,7 +201,8 @@ class BackupService:
                 (self.config_dir / PENDING).unlink()
                 shutil.rmtree(_stage_path(self.config_dir, journal['stage']))
                 atomic_write_json(self.config_dir / RESULT, {'status': 'failed',
-                                  'message': 'Restore cancelled; previous configuration retained'}, backup=False)
+                                  'message': 'Restore cancelled; previous configuration retained',
+                                  'finished_at': datetime.now(timezone.utc).isoformat()}, backup=False)
                 self.restart()  # Resume the previous services without a pending restore.
                 raise
             with self._lock:
