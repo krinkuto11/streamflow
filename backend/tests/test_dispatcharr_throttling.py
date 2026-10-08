@@ -124,6 +124,46 @@ def test_throttled_initial_login_burst_uses_one_shared_retry(monkeypatch, creden
     assert len(errors) == 1  # The original throttled attempt retains its failure result.
 
 
+@pytest.mark.parametrize('throttle_first', [False, True])
+def test_concurrent_refresh_waiters_reuse_completed_login(monkeypatch, credentials, clock, throttle_first):
+    # Gate first lock acquisition so every caller has observed the old login
+    # generation. Nested acquisition by _login remains reentrant.
+    class GatedLock:
+        def __init__(self):
+            self.lock = threading.RLock()
+            self.local = threading.local()
+            self.barrier = threading.Barrier(8)
+        def __enter__(self):
+            depth = getattr(self.local, 'depth', 0)
+            if depth == 0:
+                self.barrier.wait(timeout=3)
+            self.lock.acquire()
+            self.local.depth = depth + 1
+        def __exit__(self, *args):
+            self.local.depth -= 1
+            self.lock.release()
+    monkeypatch.setattr(auth, '_token_refresh_lock', GatedLock())
+    attempts = []
+    def post(*args, **kwargs):
+        attempts.append(clock['now'])
+        if throttle_first and len(attempts) == 1:
+            return response(429, headers={'Retry-After': '46'})
+        return response(200, {'access': 'refreshed-token'})
+    monkeypatch.setattr(auth.requests, 'post', post)
+    monkeypatch.setenv('DISPATCHARR_TOKEN', 'expired-token')
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(auth._refresh_token())) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    assert attempts == ([1000, 1046] if throttle_first else [1000])
+    assert results.count(True) == (7 if throttle_first else 8)
+    assert results.count(False) == (1 if throttle_first else 0)
+    assert auth._get_auth_headers()['Authorization'] == 'Bearer refreshed-token'
+
+
 def test_missing_hint_uses_cooldown_and_changed_credentials_do_not_inherit_it(monkeypatch, credentials, clock):
     post = Mock(side_effect=[response(429), response(200, {'access': 'new-token'})])
     monkeypatch.setattr(auth.requests, 'post', post)
