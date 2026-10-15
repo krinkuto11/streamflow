@@ -187,6 +187,10 @@ class CheckerQueueMixin:
 
     def _cancel_active_queue_entry_executions_locked(self) -> None:
         """Cancel worker reservations without releasing their ownership fence."""
+        for run in getattr(self, '_parallel_preflight_runs', {}).values():
+            run._external_abort_generation += 1
+            run.abort_current_check.set()
+            run.progress.clear()
         for execution in getattr(
             self,
             '_active_queue_entry_executions',

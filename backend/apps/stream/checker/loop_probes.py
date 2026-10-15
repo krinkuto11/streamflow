@@ -76,6 +76,7 @@ class CheckerLoopProbesMixin:
         from apps.stream.concurrent_stream_limiter import (
             get_account_limiter,
             initialize_account_limits,
+            SmartStreamScheduler,
         )
 
         LOOP_PROBE_SCORE_THRESHOLD = 0.5
@@ -138,6 +139,7 @@ class CheckerLoopProbesMixin:
         completed = [0]
         progress_context = dict(profile_progress_context or {})
         abort_event = getattr(self, 'abort_current_check', None)
+        shared_probe_slots = getattr(self, '_preflight_probe_slots', None)
 
         def abort_requested() -> bool:
             is_set = getattr(abort_event, 'is_set', None)
@@ -217,6 +219,12 @@ class CheckerLoopProbesMixin:
                 if acquired:
                     return True, reason
                 last_reason = reason
+                if shared_probe_slots is not None and SmartStreamScheduler._is_internal_capacity_wait(
+                    SmartStreamScheduler._normalize_wait_reason(reason)
+                ):
+                    # Another game's long probe is using this slot. Do not
+                    # mark this candidate untested just because that takes >60s.
+                    deadline = time.monotonic() + 60.0
                 if reason == 'provider_profile_unavailable':
                     # Missing provider authority cannot recover during this
                     # operation. Do not turn an authoritative empty inventory
@@ -294,6 +302,7 @@ class CheckerLoopProbesMixin:
                 return
 
             acquired_profile = None
+            acquired_global = False
             preempted_for_viewer = threading.Event()
             manual_abort_observed = threading.Event()
             preemption_token = object()
@@ -302,15 +311,33 @@ class CheckerLoopProbesMixin:
                 if abort_requested():
                     completion_status = 'aborted'
                     return
-                profile_acquired, reason, acquired_profile, probe_url = (
-                    account_limiter.reserve_profile_for_stream_with_url(reservation_stream)
-                )
-                if not profile_acquired:
-                    logger.info(
-                        f"[loop-probe:{tag}] Skipping stream - "
-                        f"profile slot unavailable ({reason})"
+                while True:
+                    profile_acquired, reason, acquired_profile, probe_url = (
+                        account_limiter.reserve_profile_for_stream_with_url(reservation_stream)
                     )
-                    return
+                    if profile_acquired:
+                        break
+                    if shared_probe_slots is None or not SmartStreamScheduler._is_internal_capacity_wait(
+                        SmartStreamScheduler._normalize_wait_reason(reason)
+                    ):
+                        logger.info(
+                            f"[loop-probe:{tag}] Skipping stream - "
+                            f"profile slot unavailable ({reason})"
+                        )
+                        return
+                    # Another game may hold this stream's only compatible
+                    # credential even when aggregate account capacity is free.
+                    # Release the partial reservation while waiting, then retry
+                    # against current viewer and provider authority.
+                    acquired_account = False
+                    account_limiter.release(account_id)
+                    if abort_event.wait(0.25):
+                        completion_status = 'aborted'
+                        return
+                    acquired_account, reason = acquire_account_with_abort(account_id)
+                    if not acquired_account:
+                        completion_status = 'aborted' if reason == 'aborted' else 'skipped'
+                        return
 
                 if not isinstance(probe_url, str) or not probe_url:
                     logger.warning(
@@ -341,6 +368,16 @@ class CheckerLoopProbesMixin:
                     if should_preempt:
                         preempted_for_viewer.set()
                     return should_preempt
+
+                if shared_probe_slots is not None:
+                    while not shared_probe_slots.acquire(timeout=0.25):
+                        if should_abort_for_viewer():
+                            completion_status = 'aborted' if abort_requested() else 'viewer_preempted'
+                            return
+                    acquired_global = True
+                    if should_abort_for_viewer():
+                        completion_status = 'aborted' if abort_requested() else 'viewer_preempted'
+                        return
 
                 logger.info(
                     f"[loop-probe:{tag}] Probing stream "
@@ -377,15 +414,18 @@ class CheckerLoopProbesMixin:
                 # loop_detected remains None — distinguishable from clean (False)
                 # or detected (True)
             finally:
+                if acquired_global:
+                    shared_probe_slots.release()
                 if acquired_profile is not None:
                     try:
                         account_limiter.release_profile(acquired_profile)
                     except Exception as e:
                         logger.warning(f"[loop-probe:{tag}] Profile release failed: {e}")
-                try:
-                    account_limiter.release(account_id)
-                except Exception as e:
-                    logger.warning(f"[loop-probe:{tag}] Account release failed: {e}")
+                if acquired_account:
+                    try:
+                        account_limiter.release(account_id)
+                    except Exception as e:
+                        logger.warning(f"[loop-probe:{tag}] Account release failed: {e}")
                 if preemption_claimed:
                     try:
                         account_limiter.release_viewer_preemption_claim(preemption_token)

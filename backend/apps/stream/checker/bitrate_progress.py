@@ -53,6 +53,7 @@ def create_bitrate_progress(
                 300,
             ),
             capacity_transition_lock=stream_statuses_lock,
+            probe_slots=getattr(self, '_preflight_probe_slots', None),
             ffmpeg_duration=analysis_params.get('ffmpeg_duration', 30),
             timeout=analysis_params.get('timeout', 30),
             retries=0,

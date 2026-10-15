@@ -51,3 +51,30 @@ Validation includes source-AST comparison of the relocated methods (normalizing
 only dependency access), followed by runtime regression and integration checks.
 The source-location regression reads the actual concurrent/sequential methods
 rather than assuming all execution code lives in the facade file.
+
+## Parallel Teamarr preflight
+
+Teamarr's `max_concurrent_checks` is a game-job limit, independent of
+`concurrent_streams.global_limit`, which limits actual media probes. The default
+of 1 retains serial execution. Values above 1 route preflights through the
+existing priority queue; the worker dispatches bounded jobs from that queue.
+Each completed job makes room for the next queued game without waiting for
+other games' long loop phases. Ordinary checks and full automation remain
+exclusive and keep their existing queue gates.
+
+`checker/parallel_preflight.py` owns dispatch. `checker/preflight_run.py` is an
+execution-only context: it reuses the queue, provider limiter, trackers and
+connectors, but owns in-memory progress, cancellation, and transient run state.
+It starts no independent scheduler or worker service. Queue activation tokens
+remain reserved until the entire job unwinds, including after clear/abort.
+External aborts cancel all jobs; a run-local failure cannot cancel its siblings.
+
+Initial probes, bitrate rechecks and loop tests all use one shared semaphore
+for the active preflight group. Provider/profile reservations and viewer
+preemption continue to use the existing account limiter. This does not bypass
+or multiply account limits. Loop candidate eligibility, sampling duration,
+penalties, ranking and playback behavior are unchanged.
+
+Status includes `parallel_checks`, with independent progress for every active
+game. The Stream Checker page lets operators select the game to inspect.
+The existing `progress` field remains available for older consumers.

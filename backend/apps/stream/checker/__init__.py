@@ -15,11 +15,13 @@ from .single_stream import CheckerSingleStreamMixin
 from .concurrent_channel import CheckerConcurrentChannelMixin
 from .sequential_channel import CheckerSequentialChannelMixin
 from .loop_probes import CheckerLoopProbesMixin
+from .parallel_preflight import CheckerParallelPreflightMixin
 from apps.stream.queue_execution import StreamCheckQueueExecutionMixin
 from apps.stream.stream_stats_writer import StreamStatsWriterMixin
 
 
 class CheckerOperationsMixin(
+    CheckerParallelPreflightMixin,
     CheckerQueueMixin,
     CheckerOwnershipMixin,
     CheckerInventoryMixin,

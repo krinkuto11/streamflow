@@ -586,13 +586,13 @@ export const operatorHelpDetailTopics = [
         risk: 'Too short can repeat checks and consume provider/profile capacity; too long can hide intentional retests unless you run a manual check.',
       },
       {
-        name: 'Concurrent Checks',
+        name: 'Concurrent Game Checks',
         controlType: 'Visible UI setting',
         defaultValue: '1',
-        location: 'Teamarr Preflight -> Configuration card -> Concurrent Checks',
-        effect: 'Limits how many Teamarr event checks run at the same time.',
-        useWhen: 'Keep at 1 for most event-channel providers because event streams often share limited profile capacity.',
-        risk: 'Higher values can make several event channels compete for the same provider slots at kickoff.',
+        location: 'Teamarr Preflight -> Configuration card -> Concurrent Game Checks',
+        effect: 'Limits overlapping Teamarr game checks, including bitrate rechecks and loop tests. Every game shares the global worker limit and provider/profile capacity.',
+        useWhen: 'Increase when several games start together and provider connections remain available during long tests. View and select each running game on Stream Checker.',
+        risk: 'This does not add provider connections or multiply the global worker limit. Games wait for available capacity; viewers retain priority. Existing running checks finish if you lower this setting.',
       },
       {
         name: 'Queue Events During Active Checks',

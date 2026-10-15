@@ -430,6 +430,9 @@ class CheckerStatusMixin:
         """Get current service status."""
         queue_status = self.check_queue.get_status()
         progress = self.progress.get()
+        parallel_checks = self._parallel_preflight_progress()
+        if parallel_checks:
+            progress = next((item['progress'] for item in parallel_checks if item['progress']), None)
         observed_progress = deepcopy(progress)
         worker_context = self._active_worker_context(progress)
         if worker_context['active'] > 0:
@@ -589,6 +592,7 @@ class CheckerStatusMixin:
             'operation_timings': STREAM_OPERATION_TIMINGS.snapshot(),
             'queue': queue_status,
             'progress': progress,
+            'parallel_checks': parallel_checks,
             'progress_stale': bool(progress_stale),
             'progress_stale_details': progress_stale or {},
             'connectivity_guard': connectivity_guard_status,

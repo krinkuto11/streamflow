@@ -22,6 +22,7 @@ import { getExternalStaleDiagnosticsDisplay } from '@/lib/external-stale-diagnos
 import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
 import { getCurrentProgressDisplay } from '@/lib/stream-checker-progress-display.js'
 import { loadStreamCheckerPoll } from '@/lib/stream-checker-poll.js'
+import { selectParallelCheckProgress } from '@/lib/parallel-check-progress.js'
 import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote, getHardwareRuntimeDeviceLabel } from '@/lib/hardware-status-display.js'
 import {
   getParallelProgressBadgeText,
@@ -58,7 +59,10 @@ const PAGINATION_MAX_VISIBLE_PAGES = 5
 
 export default function StreamChecker() {
   const [status, setStatus] = useState(null)
-  const [progress, setProgress] = useState(null)
+  const [ordinaryProgress, setProgress] = useState(null)
+  const [selectedCheckChannel, setSelectedCheckChannel] = useState(null)
+  const parallelChecks = status?.parallel_checks || []
+  const progress = selectParallelCheckProgress(parallelChecks, ordinaryProgress, selectedCheckChannel)
   const [config, setConfig] = useState(null)
   const [hardwareStatus, setHardwareStatus] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -653,6 +657,30 @@ export default function StreamChecker() {
       )}
 
       {/* Current Progress */}
+      {parallelChecks.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Running Game Checks</CardTitle>
+            <CardDescription>
+              {parallelChecks.length} game checks share the global worker and provider connection limits.
+              Select a game to view its progress below.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            {parallelChecks.map(run => (
+              <Button
+                key={`${run.channel_id}:${run.queue_entry_token}`}
+                variant={String(progress?.channel_id) === String(run.channel_id) ? 'default' : 'outline'}
+                onClick={() => setSelectedCheckChannel(String(run.channel_id))}
+                className="h-auto flex-col items-start gap-1 py-2"
+              >
+                <span>{run.progress?.channel_name || `Channel ${run.channel_id}`}</span>
+                <span className="text-xs font-normal">{run.progress?.step || 'Starting'} · {run.progress?.percentage || 0}%</span>
+              </Button>
+            ))}
+          </CardContent>
+        </Card>
+      )}
       {showCurrentProgress && (
         <Card>
           <CardHeader>

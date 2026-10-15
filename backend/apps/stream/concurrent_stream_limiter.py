@@ -2532,6 +2532,7 @@ class SmartStreamScheduler:
         abort_event: Optional[threading.Event] = None,
         provider_wait_timeout: Optional[float] = 300.0,
         capacity_transition_lock: Optional[Any] = None,
+        probe_slots: Optional[Any] = None,
         **check_params
     ) -> List[Dict[str, Any]]:
         """
@@ -2556,6 +2557,8 @@ class SmartStreamScheduler:
                 publication. Reservation/start and release/terminal transitions run
                 under this boundary so a heartbeat cannot mix stream rows and profile
                 slots from different capacity generations.
+            probe_slots: Optional shared semaphore for parallel channel runs.
+                All phases in those runs consume the same global probe budget.
             **check_params: Additional parameters for check_function
             
         Returns:
@@ -2612,7 +2615,7 @@ class SmartStreamScheduler:
             max(self.global_limit * 2, self.global_limit + len(account_groups), 16),
             64,
         )
-        global_probe_slots = threading.Semaphore(max(1, self.global_limit))
+        global_probe_slots = probe_slots if probe_slots is not None else threading.Semaphore(max(1, self.global_limit))
         logger.info(
             "Using %s coordination workers for %s streams with %s global probe slots",
             worker_count,

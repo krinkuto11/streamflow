@@ -681,6 +681,7 @@ class CheckerConcurrentChannelMixin:
                         abort_event=self.abort_current_check,
                         provider_wait_timeout=self.config.get('concurrent_streams.provider_wait_timeout', 300),
                         capacity_transition_lock=stream_statuses_lock,
+                        probe_slots=getattr(self, '_preflight_probe_slots', None),
                         ffmpeg_duration=analysis_params.get('ffmpeg_duration', 30),
                         timeout=analysis_params.get('timeout', 30),
                         retries=analysis_params.get('retries', 1),

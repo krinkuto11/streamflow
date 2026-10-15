@@ -259,6 +259,9 @@ class StreamCheckerService(CheckerOperationsMixin):
         # a separate execution reservation until that exact call returns so a
         # new direct/synchronous owner cannot clear its abort or overlap writes.
         self._active_queue_entry_executions = {}
+        self._parallel_preflight_runs = {}
+        self._preflight_probe_slots = None
+        self._preflight_inventory_lock = threading.Lock()
         self._cancel_queueing = False
         self._sync_batch_generation = 0
         self._specialized_queue_gates = set()
@@ -423,8 +426,18 @@ class StreamCheckerService(CheckerOperationsMixin):
                     time.sleep(1)
                     continue
                 self._apply_specialized_queue_deferral()
+                if self._dispatch_parallel_preflight_checks():
+                    time.sleep(0.1)
+                    continue
                 logger.debug("Worker waiting for next channel from queue...")
-                queue_entry = self.check_queue.get_next_entry(timeout=1.0)
+                if getattr(self, '_parallel_preflight_enabled', False):
+                    # A preflight can arrive while this dequeue is blocked.
+                    # Leave it queued for the parallel dispatcher next iteration.
+                    queue_entry = self.check_queue.get_next_entry(
+                        timeout=1.0, excluded_metadata_sources={'teamarr_preflight'},
+                    )
+                else:
+                    queue_entry = self.check_queue.get_next_entry(timeout=1.0)
                 if queue_entry is None:
                     # No channel in queue - check if we should finalize a batch
                     if batch_changelog_generation is not None:
@@ -439,6 +452,10 @@ class StreamCheckerService(CheckerOperationsMixin):
                 queue_entry_token = queue_entry.get('queue_entry_token')
                 queue_metadata = queue_entry.get('metadata') or {}
 
+                # The UI may enable parallel preflight while the ordinary
+                # dequeue was blocked with the previous sequential setting.
+                if queue_metadata.get('source') == 'teamarr_preflight' and self._dispatch_parallel_preflight_checks(queue_entry):
+                    continue
                 single_check_metadata = self._is_specialized_queue_metadata(queue_metadata)
 
                 if not single_check_metadata:

@@ -1135,7 +1135,9 @@ class StreamCheckQueue:
             'queue_entry_token': entry_token,
         }
 
-    def get_next_entry_for_metadata_sources(self, sources: set) -> Optional[Dict[str, Any]]:
+    def get_next_entry_for_metadata_sources(
+        self, sources: set, *, respect_pause: bool = False, excluded_channel_ids=None,
+    ) -> Optional[Dict[str, Any]]:
         """Pop the highest-priority queued entry whose metadata source matches."""
         wanted_sources = set(sources or set())
         if not wanted_sources:
@@ -1143,6 +1145,9 @@ class StreamCheckQueue:
 
         deferred_items = []
         with self.lock:
+            if respect_pause and self.paused:
+                return None
+            excluded = set(excluded_channel_ids or ())
             try:
                 while True:
                     try:
@@ -1160,7 +1165,7 @@ class StreamCheckQueue:
                         continue
 
                     metadata = self.queued_metadata.get(channel_id, {}) or {}
-                    if metadata.get("source") in wanted_sources:
+                    if metadata.get("source") in wanted_sources and channel_id not in excluded:
                         return self._activate_queued_entry_locked(channel_id)
 
                     deferred_items.append(item)
@@ -1184,7 +1189,9 @@ class StreamCheckQueue:
                 return True
         return False
 
-    def get_next_entry(self, timeout: float = 1.0) -> Optional[Dict[str, Any]]:
+    def get_next_entry(
+        self, timeout: float = 1.0, *, excluded_metadata_sources=None,
+    ) -> Optional[Dict[str, Any]]:
         """Get the next queue entry to check."""
         try:
             item = self.queue.get(timeout=timeout)
@@ -1209,7 +1216,7 @@ class StreamCheckQueue:
                     return None
 
                 metadata = self.queued_metadata.get(channel_id, {}) or {}
-                if metadata.get("source") in self.deferred_metadata_sources:
+                if metadata.get("source") in self.deferred_metadata_sources or metadata.get("source") in (excluded_metadata_sources or ()):
                     self.queue.put_nowait(item)
                     self._maybe_compact_queue_heap_locked()
                     self.stats['queue_size'] = len(self.queued)
@@ -1671,10 +1678,25 @@ class StreamCheckerProgress:
     # back to unguarded publications when its getter is broken.
     GENERATION_GUARD_CAPABLE = True
     
-    def __init__(self, progress_file: Optional[Any] = None):
+    def __init__(self, progress_file: Optional[Any] = None, *, persist: bool = True):
         self.lock = threading.Lock()
         self.progress_file = progress_file
         self._generation = 0
+        self._persist = persist
+        self._memory_progress = {}
+
+    def _read_progress(self):
+        if not self._persist:
+            return copy.deepcopy(self._memory_progress)
+        from apps.database.manager import get_db_manager
+        return get_db_manager().get_system_setting('stream_checker_progress', {})
+
+    def _write_progress(self, value):
+        if not self._persist:
+            self._memory_progress = copy.deepcopy(value)
+            return
+        from apps.database.manager import get_db_manager
+        get_db_manager().set_system_setting('stream_checker_progress', value)
 
     def get_generation(self) -> int:
         """Return the in-memory clear generation for guarded publications."""
@@ -2051,7 +2073,6 @@ class StreamCheckerProgress:
                capacity_profile_source: Optional[str] = None,
                expected_generation: Optional[int] = None):
         """Update progress information."""
-        from apps.database.manager import get_db_manager
         with self.lock:
             if (
                 expected_generation is not None
@@ -2103,8 +2124,7 @@ class StreamCheckerProgress:
                     progress_data['provider_summary'] = self._build_provider_summary(provider_progress)
             
             try:
-                db = get_db_manager()
-                existing = db.get_system_setting('stream_checker_progress', {}) or {}
+                existing = self._read_progress() or {}
                 same_channel = str(existing.get('channel_id')) == str(channel_id)
                 if same_channel:
                     for key in (
@@ -2123,7 +2143,7 @@ class StreamCheckerProgress:
                     ):
                         if key not in progress_data and existing.get(key) not in (None, ''):
                             progress_data[key] = existing.get(key)
-                db.set_system_setting('stream_checker_progress', progress_data)
+                self._write_progress(progress_data)
             except Exception as e:
                 logger.warning(f"Failed to write progress to database: {e}")
             if self.progress_file:
@@ -2135,12 +2155,10 @@ class StreamCheckerProgress:
     
     def clear(self):
         """Clear progress tracking."""
-        from apps.database.manager import get_db_manager
         with self.lock:
             self._generation += 1
             try:
-                db = get_db_manager()
-                db.set_system_setting('stream_checker_progress', {})
+                self._write_progress({})
             except Exception as e:
                 logger.warning(f"Failed to clear progress in database: {e}")
             if self.progress_file:
@@ -2151,16 +2169,13 @@ class StreamCheckerProgress:
 
     def clear_if_matches(self, expected: Optional[Dict]) -> bool:
         """Atomically clear only the progress snapshot the caller observed."""
-        from apps.database.manager import get_db_manager
 
         with self.lock:
-            db = None
             current = None
             try:
-                db = get_db_manager()
-                current = db.get_system_setting('stream_checker_progress', {}) or None
+                current = self._read_progress() or None
             except Exception:
-                db = None
+                pass
             if current is None and self.progress_file:
                 try:
                     current = load_json_with_backup(
@@ -2179,9 +2194,7 @@ class StreamCheckerProgress:
             self._generation += 1
 
             try:
-                if db is None:
-                    db = get_db_manager()
-                db.set_system_setting('stream_checker_progress', {})
+                self._write_progress({})
             except Exception as e:
                 logger.warning(f"Failed to clear matching progress in database: {e}")
             if self.progress_file:
@@ -2193,11 +2206,9 @@ class StreamCheckerProgress:
     
     def get(self) -> Optional[Dict]:
         """Get current progress."""
-        from apps.database.manager import get_db_manager
         with self.lock:
             try:
-                db = get_db_manager()
-                data = db.get_system_setting('stream_checker_progress', {})
+                data = self._read_progress()
                 if data:
                     return data
             except Exception:

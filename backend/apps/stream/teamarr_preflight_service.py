@@ -2112,6 +2112,8 @@ class TeamarrPreflightService:
         if config.get("queue_during_active_checks", True) and self._automation_active():
             self._set_stream_checker_event_gate(True, gate_name="teamarr_preflight_automation")
             return self._queue_check(event, config, autostart_worker=False)
+        if int(config["max_concurrent_checks"]) > 1:
+            return self._queue_check(event, config, autostart_worker=True)
         if self._stream_checker_active():
             return self._queue_check(event, config, autostart_worker=False)
 
@@ -2502,6 +2504,13 @@ class TeamarrPreflightService:
             return None
         if self._automation_active():
             return "automation_active"
+        if int(config.get("max_concurrent_checks", 1)) > 1:
+            try:
+                checker = self.stream_checker_provider()
+                if checker.can_queue_parallel_preflight() is True:
+                    return None
+            except Exception:
+                pass  # Unknown ownership must use the existing conservative gate.
         if self._stream_checker_active():
             return "stream_checker_active"
         return None

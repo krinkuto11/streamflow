@@ -46,7 +46,7 @@ const numberFields = [
   { key: 'poll_interval_seconds', label: 'Teamarr Poll Interval', suffix: 'sec', min: 15, max: 3600, description: 'How often StreamFlow reads Teamarr managed events. 30-60 sec keeps narrow event windows reliable.' },
   { key: 'preflight_offset_minutes', label: 'Preflight Offset', suffix: 'min', min: 1, max: 360, description: 'Main automatic check before start. 20 means the first check becomes due around -20 min.' },
   { key: 'post_start_grace_minutes', label: 'Post Start Grace', suffix: 'min', min: 0, max: 120, description: 'How long after start post-start offsets can still run.' },
-  { key: 'max_concurrent_checks', label: 'Concurrent Checks', suffix: 'max', min: 1, max: 10, description: 'Maximum Teamarr event checks running at the same time.' },
+  { key: 'max_concurrent_checks', label: 'Concurrent Game Checks', suffix: 'max', min: 1, max: 10, description: 'Games checked at once, including long loop tests. All games share Stream Checker\'s global worker limit and available provider connections. 1 checks games one at a time.' },
   { key: 'event_cooldown_minutes', label: 'Event Cooldown', suffix: 'min', min: 1, max: 10080, description: 'Prevents the same event bucket from repeating after it already ran.' },
 ]
 
