@@ -93,7 +93,7 @@ jobs:
         npm run build
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@v4
 
     - name: Cache Docker layers
       uses: actions/cache@v6
@@ -193,7 +193,7 @@ jobs:
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Set image tag based on branch
         id: set_tag
