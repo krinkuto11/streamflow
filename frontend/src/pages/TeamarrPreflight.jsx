@@ -10,6 +10,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip.jsx'
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu.jsx'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
+import { PreflightStreamDetails } from '@/components/PreflightStreamDetails.jsx'
 import { useVisiblePolling } from '@/hooks/use-visible-polling.js'
 import { useToast } from '@/hooks/use-toast.js'
 import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
@@ -1394,6 +1395,7 @@ export default function TeamarrPreflight() {
                             </>
                           ) : null}
                         </div>
+                        <PreflightStreamDetails key={lastPreflightEvent?.details?.inspection_id || 'no-inspection'} event={lastPreflightEvent} />
                         {healthAlert ? (
                           <div
                             className={`mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-sm ${

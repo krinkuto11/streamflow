@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from apps.core.log_sanitizer import audit_ref as _audit_ref, stream_context
+from apps.stream.preflight_inspection import build_inspection
 from apps.stream.quality_report_fields import VISUAL_PROBE_REPORT_FIELDS
 from apps.core.operation_timing import STREAM_OPERATION_TIMINGS
 from apps.core.stream_stats_utils import extract_stream_stats, format_stream_stats_for_display
@@ -394,6 +395,25 @@ class CheckerConcurrentChannelMixin:
                     len(protected_active_stream_ids),
                 )
 
+            inspection_reasons = {}
+
+            def inspection_result(analyzed, ordered_ids=None, dead_ids=()):
+                if run_mode != 'teamarr_preflight':
+                    return None
+                return build_inspection(
+                    streams=streams, analyzed=analyzed,
+                    skipped=active_viewer_skipped_streams + [
+                        {'id': item['id'], 'reason': 'cached_measurement'}
+                        for item in streams_already_checked
+                    ],
+                    checked_ids={item['id'] for item in streams_to_check},
+                    dead_ids=set(dead_ids), ordered_ids=ordered_ids,
+                    profile=profile, priority_mode=priority_mode, priority_ids=priority_m3u_ids,
+                    provider_names={item['id']: self._get_m3u_account_name(item['id'], udi)
+                                    for item in streams[:500]},
+                    decision_reasons=inspection_reasons,
+                )
+
             # Identify which streams need analysis (new or unchecked)
 
             if target_stream_ids is not None:
@@ -521,6 +541,7 @@ class CheckerConcurrentChannelMixin:
                                 [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked]
                                 + active_viewer_skipped_streams
                             ),
+                            'preflight_inspection': inspection_result([]),
                             'checked_streams': cached_stats
                         }
                     else:
@@ -565,6 +586,7 @@ class CheckerConcurrentChannelMixin:
 
             # Prepare for concurrent execution
             analyzed_streams = []
+            results = []
             dead_stream_ids = set()  # Use set for O(1) lookups
             revived_stream_ids = []
             preempted_stream_ids = set()
@@ -842,6 +864,7 @@ class CheckerConcurrentChannelMixin:
                         else:
                             # Not allowed to revive, treat as still dead
                             dead_stream_ids.add(stream_id)
+                            inspection_reasons[stream_id] = 'revival_disabled'
                             logger.info(
                                 f"Stream is alive but revival is disabled by profile: "
                                 f"{stream_context(stream_id=stream_id, stream_url=stream_url, channel_id=channel_id)}"
@@ -1055,6 +1078,12 @@ class CheckerConcurrentChannelMixin:
 
             analyzed_streams.sort(key=lambda x: x['sort_key'])
 
+            # Retain all evaluated candidates for preflight diagnostics before filtering.
+            inspection_candidates = list(analyzed_streams) if run_mode == 'teamarr_preflight' else []
+            if run_mode == 'teamarr_preflight':
+                included_ids = {item.get('stream_id') for item in inspection_candidates}
+                inspection_candidates.extend(item for item in results if item.get('stream_id') not in included_ids)
+
             # Apply stream limit if configured in profile
             if stream_limit > 0 and len(analyzed_streams) > stream_limit:
                 removed_count = len(analyzed_streams) - stream_limit
@@ -1140,6 +1169,7 @@ class CheckerConcurrentChannelMixin:
                     'success': True,
                     'skipped': True,
                     'reason': 'in_monitoring_session',
+                    'preflight_inspection': inspection_result(inspection_candidates, dead_ids=dead_stream_ids),
                     'channel_id': channel_id,
                     'channel_name': channel_name,
                 }
@@ -1428,6 +1458,7 @@ class CheckerConcurrentChannelMixin:
                     [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked]
                     + active_viewer_skipped_streams
                 ),
+                'preflight_inspection': inspection_result(inspection_candidates, reordered_ids, dead_stream_ids),
                 'checked_streams': stream_stats,
                 'channel_visibility': visibility_result,
                 # In-memory analyzed_streams: authoritative source for loop results

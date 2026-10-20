@@ -38,6 +38,17 @@ def get_teamarr_preflight_status_response(*, get_service: Callable[[], Any]):
         return error_response("Internal Server Error", status_code=500, code="internal_error")
 
 
+def get_teamarr_preflight_inspection_response(*, inspection_id: str, get_service: Callable[[], Any]):
+    try:
+        result = get_service().get_inspection(inspection_id)
+        if result is None:
+            return error_response("Stream details are no longer available", status_code=404, code="inspection_not_found")
+        return jsonify(result), 200
+    except Exception as exc:
+        logger.error("Error loading preflight stream details: %s", exc, exc_info=True)
+        return error_response("Internal Server Error", status_code=500, code="internal_error")
+
+
 def start_teamarr_preflight_response(*, get_service: Callable[[], Any]):
     try:
         service = get_service()

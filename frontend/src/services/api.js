@@ -273,6 +273,7 @@ export const teamarrPreflightAPI = {
   stop: () => api.post('/teamarr-preflight/stop'),
   runOnce: () => api.post('/teamarr-preflight/run-once'),
   forceEventCheck: (identity) => api.post('/teamarr-preflight/events/force-check', { identity }),
+  getInspection: (id, options) => api.get(`/teamarr-preflight/inspections/${encodeURIComponent(id)}`, options),
 };
 
 export const changelogAPI = {

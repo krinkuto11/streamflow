@@ -1305,6 +1305,7 @@ class CheckerSingleChannelMixin:
                 'channels_hidden': check_stats.get('channels_hidden'),
                 'channels_ready': check_stats.get('channels_ready'),
                 'channel_visibility_changed': check_stats.get('channel_visibility_changed'),
+                'preflight_inspection': check_result.get('preflight_inspection') if checking_enabled else None,
                 'stats': check_stats
             }
 

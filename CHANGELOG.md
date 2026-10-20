@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Teamarr preflight stream inspection (#509)** - Expand an item's Stream details to inspect each provider's status, failure reason, measured quality, score, and saved channel rank. Results retain removed and limited candidates, distinguish skipped and previous measurements, and load without starting another check.
+
 ### Changed
 - **GitHub Actions maintenance (#486–488)** - Update Python setup to v7, Docker image builds to build-push-action v7, and Docker layer caching to cache v6. Preserve the application runtimes, cache paths, image tags, and publication rules.
 - **Project overview and setup documentation** - Refresh README badges, stable/development image guidance, current features, verified setting locations and example-data screenshots. Document the required Compose `.env` file and persistent volume; mention Dispatcharr's Unraid store availability without a link or installation instructions. Include the stable 2.7.0 release notes linked from the overview.

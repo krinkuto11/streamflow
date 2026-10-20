@@ -173,6 +173,7 @@ from apps.api.teamarr_preflight_handlers import (
     force_teamarr_preflight_event_response,
     get_teamarr_preflight_config_response,
     get_teamarr_preflight_status_response,
+    get_teamarr_preflight_inspection_response,
     run_teamarr_preflight_once_response,
     start_teamarr_preflight_response,
     stop_teamarr_preflight_response,
@@ -1760,6 +1761,13 @@ def get_teamarr_preflight_status():
     return get_teamarr_preflight_status_response(
         get_service=get_teamarr_preflight_service,
     )
+
+@app.route('/api/teamarr-preflight/inspections/<inspection_id>', methods=['GET'])
+def get_teamarr_preflight_inspection(inspection_id):
+    return get_teamarr_preflight_inspection_response(
+        inspection_id=inspection_id, get_service=get_teamarr_preflight_service,
+    )
+
 
 @app.route('/api/teamarr-preflight/start', methods=['POST'])
 def start_teamarr_preflight():
