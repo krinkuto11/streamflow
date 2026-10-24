@@ -1975,6 +1975,7 @@ def get_epg_refresh_processor_status():
     return get_epg_refresh_processor_status_response(
         epg_refresh_thread=epg_refresh_thread,
         epg_refresh_running=epg_refresh_running,
+        get_scheduling_service=get_scheduling_service,
     )
 
 

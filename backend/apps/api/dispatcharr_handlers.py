@@ -8,6 +8,7 @@ import requests
 from flask import jsonify
 
 from apps.core.logging_config import setup_logging
+from apps.core.dispatcharr_access import DispatcharrAccessError, probe_admin_access
 from apps.background.setup_startup import initialize_setup_data
 
 logger = setup_logging(__name__)
@@ -126,20 +127,20 @@ def test_dispatcharr_connection_response(
                     400,
                 )
 
-            channels_url = f"{test_base_url}/api/channels/channels/"
             try:
-                channels_resp = requests.get(
-                    channels_url,
+                probe_admin_access(
+                    test_base_url,
                     headers={
                         "Authorization": f"ApiKey {test_api_key}",
                         "X-API-Key": test_api_key,
                         "Accept": "application/json",
                     },
-                    params={"page_size": 1},
+                    get=requests.get,
                     timeout=10,
                 )
-                channels_resp.raise_for_status()
                 return jsonify({"success": True, "message": "Connection successful"})
+            except DispatcharrAccessError as exc:
+                return jsonify({"success": False, "code": exc.code, "error": str(exc)}), 403
             except requests.exceptions.Timeout:
                 return (
                     jsonify(
@@ -185,27 +186,17 @@ def test_dispatcharr_connection_response(
             token = body.get("access") or body.get("token")
 
             if token:
-                channels_url = f"{test_base_url}/api/channels/channels/"
-                channels_resp = requests.get(
-                    channels_url,
+                probe_admin_access(
+                    test_base_url,
                     headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                    params={"page_size": 1},
+                    get=requests.get,
                     timeout=10,
                 )
-
-                if channels_resp.status_code == 200:
-                    return jsonify({"success": True, "message": "Connection successful"})
-                return (
-                    jsonify(
-                        {
-                            "success": False,
-                            "error": "Authentication successful but failed to fetch channels",
-                        }
-                    ),
-                    400,
-                )
+                return jsonify({"success": True, "message": "Connection successful"})
 
             return jsonify({"success": False, "error": "No token received from Dispatcharr"}), 400
+        except DispatcharrAccessError as exc:
+            return jsonify({"success": False, "code": exc.code, "error": str(exc)}), 403
         except requests.exceptions.Timeout:
             return (
                 jsonify(

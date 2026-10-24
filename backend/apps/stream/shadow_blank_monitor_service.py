@@ -40,6 +40,7 @@ from apps.stream.stream_check_utils import (
     _parse_freeze_detection,
     _probe_stream_for_loops,
 )
+from apps.stream.proxy_probe_session import ProxyProbeSession, with_proxy_session
 from apps.udi import get_udi_manager
 
 logger = setup_logging(__name__)
@@ -112,6 +113,8 @@ PROXY_OUTPUT_FORMAT_ALIASES = {
     "mp4": "fmp4",
     "mpegts": "mpegts",
     "ts": "mpegts",
+    "hls": "hls",
+    "m3u8": "hls",
 }
 SHADOW_WATCHER_USER_AGENT_MARKER = "StreamFlow-Shadow-Blank-Monitor/1.0"
 DEFAULT_WATCHER_USER_AGENT = f"TiviMate/5.1.6 {SHADOW_WATCHER_USER_AGENT_MARKER}"
@@ -4257,7 +4260,6 @@ class ShadowBlankMonitorService:
         config: Dict[str, Any],
         url: str,
     ) -> None:
-        command = self._persistent_watcher_command(url, config)
         with self._config_mutation_lock:
             with self._lock:
                 snapshot_revision = config.get(CONFIG_REVISION_KEY)
@@ -4282,7 +4284,10 @@ class ShadowBlankMonitorService:
                 )
             if not eligible:
                 return
+            proxy_session = ProxyProbeSession(url, config)
             try:
+                proxy_session.__enter__()
+                command = self._persistent_watcher_command(proxy_session.url, proxy_session.config)
                 process = subprocess.Popen(
                     command,
                     stdout=subprocess.DEVNULL,
@@ -4290,15 +4295,17 @@ class ShadowBlankMonitorService:
                     stdin=subprocess.DEVNULL,
                 )
             except Exception as exc:
+                proxy_session.close()
                 logger.warning(
-                    "Shadow persistent watcher failed to start for %s: %s",
+                    "Shadow persistent watcher failed to start for %s (%s)",
                     target.get("channel_ref") or _ref("channel", channel_uuid),
-                    exc,
+                    type(exc).__name__,
                 )
                 return
 
             session = {
                 "process": process,
+                "proxy_session": proxy_session,
                 "url": url,
                 "stream_id": target.get("stream_id"),
                 "output_format": target.get("viewer_output_format"),
@@ -4333,17 +4340,22 @@ class ShadowBlankMonitorService:
     @staticmethod
     def _terminate_persistent_watcher_session(session: Dict[str, Any]) -> None:
         process = session.get("process")
-        if process is None or process.poll() is not None:
-            return
         try:
-            process.terminate()
-            process.wait(timeout=3)
-        except Exception:
+            if process is None or process.poll() is not None:
+                return
             try:
-                process.kill()
+                process.terminate()
                 process.wait(timeout=3)
             except Exception:
-                pass
+                try:
+                    process.kill()
+                    process.wait(timeout=3)
+                except Exception:
+                    pass
+        finally:
+            proxy_session = session.pop("proxy_session", None)
+            if proxy_session is not None:
+                proxy_session.close()
 
     @staticmethod
     def _persistent_watcher_configured(config: Dict[str, Any]) -> bool:
@@ -4421,10 +4433,9 @@ class ShadowBlankMonitorService:
         if not base_url:
             raise RuntimeError("Dispatcharr base URL is not configured")
         url = f"{base_url}/proxy/ts/stream/{channel_uuid}"
-        canonical_format = self._normalize_proxy_output_format(output_format)
-        if canonical_format:
-            return f"{url}?output_format={canonical_format}"
-        return url
+        # Never inherit a user/system HLS default without owning its session.
+        canonical_format = self._normalize_proxy_output_format(output_format) or "mpegts"
+        return f"{url}?output_format={canonical_format}"
 
     def _media_probe_url(self, _udi: Any, _target: Dict[str, Any], fallback_url: str) -> tuple[str, str]:
         """Probe the same Dispatcharr proxy path as the active viewer.
@@ -4842,6 +4853,7 @@ class ShadowBlankMonitorService:
             if process.poll() is None:
                 process.kill()
 
+    @with_proxy_session
     def _capture_offline_image_hash(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
         try:
             from PIL import Image
@@ -4935,6 +4947,7 @@ class ShadowBlankMonitorService:
             return ""
         return f"X-API-Key: {api_key}\r\nAuthorization: ApiKey {api_key}\r\n"
 
+    @with_proxy_session
     def _run_loop_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
         stream_tag = _ref("shadow-loop-url", url)
         loop_detected, loop_duration, frames = _probe_stream_for_loops(
@@ -5151,6 +5164,7 @@ class ShadowBlankMonitorService:
         result["no_decodable_frames_error"] = matched_pattern
         return result
 
+    @with_proxy_session
     def _run_blank_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
         command, duration = self._blank_probe_command(url, config)
         process_timeout = float(
@@ -5296,6 +5310,7 @@ class ShadowBlankMonitorService:
                 continue
         return decoded_frames, media_duration
 
+    @with_proxy_session
     def _run_blank_probe_until_viewer_left(
         self,
         url: str,

@@ -30,15 +30,15 @@ def test_production_lock_overrides_base_setuptools_with_hashed_pin():
     lock = (BACKEND_DIR / "requirements.lock").read_text(encoding="utf-8")
     test_lock = (BACKEND_DIR / "requirements-test.lock").read_text(encoding="utf-8")
 
-    assert "setuptools==83.0.0" in requirements
+    assert "setuptools==84.1.0" in requirements
     for compiled_lock in (lock, test_lock):
-        assert "setuptools==83.0.0" in compiled_lock
+        assert "setuptools==84.1.0" in compiled_lock
         assert (
-            "sha256:025bccbbf0fa05b6192bc64ae1e7b16e001fd6d6d4d5de03c97b1c1ade523bef"
+            "sha256:23657205b63d4d31395ab917815247f694aafad28cd21316bf5fd45a51048ea0"
             in compiled_lock
         )
         assert (
-            "sha256:29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3"
+            "sha256:5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"
             in compiled_lock
         )
 

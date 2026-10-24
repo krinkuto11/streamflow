@@ -239,6 +239,9 @@ def test_connection_test_accepts_api_key(monkeypatch):
     class Response:
         status_code = 200
 
+        def json(self):
+            return {"user_level": 10}
+
         def raise_for_status(self):
             return None
 
@@ -268,10 +271,10 @@ def test_connection_test_accepts_api_key(monkeypatch):
         )
 
     assert response.status_code == 200
-    assert captured["url"] == "http://dispatcharr.test/api/channels/channels/"
+    assert captured["url"] == "http://dispatcharr.test/api/accounts/users/me/"
     assert captured["headers"]["Authorization"] == "ApiKey secret-key"
     assert captured["headers"]["X-API-Key"] == "secret-key"
-    assert captured["params"] == {"page_size": 1}
+    assert captured["params"] is None
 
 
 def test_connection_test_does_not_expose_unexpected_api_key_exception(monkeypatch):

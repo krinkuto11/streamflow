@@ -11,6 +11,7 @@ from urllib.parse import urlparse, urlunparse
 import requests
 
 from apps.core.logging_config import setup_logging
+from apps.core.dispatcharr_access import DispatcharrAccessError, require_admin_user
 
 logger = setup_logging(__name__)
 
@@ -436,6 +437,15 @@ class StreamConnectivityGuard:
                     attempt_details["first_error_reason"] = first_error_reason
 
                 if 200 <= response.status_code < 400:
+                    if label == "dispatcharr_api":
+                        try:
+                            try:
+                                payload = response.json()
+                            except ValueError:
+                                payload = None
+                            require_admin_user(payload)
+                        except DispatcharrAccessError as exc:
+                            return ConnectivityCheckResult(False, exc.code, str(exc), attempt_details)
                     return ConnectivityCheckResult(True, "ok", f"{label} connectivity verified", attempt_details)
                 if accept_unauthorized and response.status_code in {401, 403}:
                     return ConnectivityCheckResult(True, "ok", f"{label} connectivity verified", attempt_details)
@@ -481,7 +491,7 @@ class StreamConnectivityGuard:
     @staticmethod
     def _build_dispatcharr_probe_url(base_url: str) -> str:
         clean = base_url.rstrip("/")
-        return f"{clean}/api/channels/channels/?page=1&page_size=1"
+        return f"{clean}/api/accounts/users/me/"
 
     @staticmethod
     def _safe_host(url: str) -> Optional[str]:
