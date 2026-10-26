@@ -252,7 +252,7 @@ class AutomationConfigManager:
             "enabled": p.enabled,
             "parallel_checks": p.parallel_checks
         }
-        extra = self._normalize_extra_settings(p.extra_settings)
+        extra = self._normalize_profile_settings(p.extra_settings)
         if extra:
             res.update(extra)
         return res
@@ -290,9 +290,21 @@ class AutomationConfigManager:
     def _coerce_non_negative_int(self, value: Any, default: int = 0) -> int:
         try:
             number = int(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return default
         return max(0, number)
+
+    def _normalize_profile_settings(self, extra_settings: Any) -> Dict[str, Any]:
+        extra = dict(self._normalize_extra_settings(extra_settings))
+        checking = extra.get('stream_checking')
+        if isinstance(checking, dict):
+            extra['stream_checking'] = {
+                **checking,
+                'provider_stream_limit': self._coerce_non_negative_int(
+                    checking.get('provider_stream_limit', 0),
+                ),
+            }
+        return extra
 
     def _coerce_bool(self, value: Any, default: bool = False) -> bool:
         if isinstance(value, bool):
@@ -448,7 +460,7 @@ class AutomationConfigManager:
                 description=profile_data.get("description", ""),
                 enabled=profile_data.get("enabled", True),
                 parallel_checks=profile_data.get("parallel_checks", 1),
-                extra_settings=extra
+                extra_settings=self._normalize_profile_settings(extra)
             )
             session.add(p)
             session.commit()
@@ -478,7 +490,7 @@ class AutomationConfigManager:
             for k,v in profile_data.items():
                 if k not in ['name', 'description', 'enabled', 'parallel_checks', 'id']:
                     current_extra[k] = v
-            p.extra_settings = current_extra
+            p.extra_settings = self._normalize_profile_settings(current_extra)
             from sqlalchemy.orm.attributes import flag_modified
             flag_modified(p, "extra_settings")
             session.commit()

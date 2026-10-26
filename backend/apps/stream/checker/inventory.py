@@ -122,8 +122,15 @@ class CheckerInventoryMixin:
         stream_ids: List[int],
         stream_limit: int,
         protected_stream_ids: set,
+        provider_stream_limit: int = 0,
+        stream_provider_ids: Optional[Dict[int, Any]] = None,
     ) -> List[int]:
-        """Apply the channel limit to the final assignment, keeping active viewers."""
+        """Prefer provider diversity, then fill the channel in its existing rank order.
+
+        The provider cap is soft: it must never leave a finite channel limit
+        underfilled when eligible candidates remain. Protected viewers reserve
+        their slots and provider quota before either selection pass.
+        """
         ordered_ids = list(dict.fromkeys(stream_ids))
         if stream_limit <= 0 or len(ordered_ids) <= stream_limit:
             return ordered_ids
@@ -131,11 +138,74 @@ class CheckerInventoryMixin:
         protected = set(ordered_ids).intersection(protected_stream_ids or set())
         capacity = max(stream_limit, len(protected))
         retained = set(protected)
+        try:
+            provider_cap = max(0, int(provider_stream_limit))
+        except (TypeError, ValueError, OverflowError):
+            provider_cap = 0
+
+        if provider_cap:
+            providers = {}
+            for stream_id, provider_id in (stream_provider_ids or {}).items():
+                try:
+                    provider_id = int(provider_id)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if provider_id > 0:
+                    providers[stream_id] = provider_id
+            counts = {}
+            for stream_id in protected:
+                provider_id = providers.get(stream_id)
+                if provider_id is not None:
+                    counts[provider_id] = counts.get(provider_id, 0) + 1
+            for stream_id in ordered_ids:
+                if len(retained) >= capacity:
+                    break
+                if stream_id in retained:
+                    continue
+                provider_id = providers.get(stream_id)
+                # Unknown/custom sources do not invent extra providers. They
+                # remain eligible for the rank-ordered fill pass below.
+                if provider_id is None or counts.get(provider_id, 0) >= provider_cap:
+                    continue
+                retained.add(stream_id)
+                counts[provider_id] = counts.get(provider_id, 0) + 1
+
         for stream_id in ordered_ids:
             if len(retained) >= capacity:
                 break
             retained.add(stream_id)
         return [stream_id for stream_id in ordered_ids if stream_id in retained]
+
+
+    def _select_profile_streams(
+        self,
+        analyzed_streams: List[Dict],
+        streams: List[Dict],
+        current_stream_ids: List[int],
+        protected_stream_ids: set,
+        stream_limit: int,
+        provider_stream_limit: int,
+        dead_stream_ids: set,
+    ) -> List[Dict]:
+        """Apply assignment limits after scoring, reserving active viewers."""
+        if stream_limit <= 0:
+            return analyzed_streams
+        if not provider_stream_limit:
+            return analyzed_streams[:stream_limit]
+
+        candidate_ids = [item['stream_id'] for item in analyzed_streams
+                         if item.get('stream_id') is not None
+                         and item['stream_id'] not in dead_stream_ids]
+        candidate_ids = self._merge_protected_stream_order(
+            current_stream_ids, candidate_ids, protected_stream_ids,
+        )
+        selected = set(self._limit_write_back_stream_ids(
+            candidate_ids, stream_limit, protected_stream_ids,
+            provider_stream_limit=provider_stream_limit,
+            stream_provider_ids={item['id']: self._get_stream_m3u_account_id(item)
+                                 for item in streams},
+        ))
+        return [item for item in analyzed_streams if item.get('stream_id') in selected]
 
 
     @staticmethod

@@ -100,6 +100,7 @@ class CheckerConcurrentChannelMixin:
 
         # Get effective profile for this channel
         stream_limit = 0
+        provider_stream_limit = 0
         allow_revive = True
         grace_period = False
         loop_check_enabled = False
@@ -154,6 +155,7 @@ class CheckerConcurrentChannelMixin:
             if profile:
                 profile_stream_checking = profile.get('stream_checking', {})
                 stream_limit = profile_stream_checking.get('stream_limit', 0)
+                provider_stream_limit = profile_stream_checking.get('provider_stream_limit', 0)
                 allow_revive = profile_stream_checking.get('allow_revive', True)
                 priority_m3u_ids = profile_stream_checking.get('m3u_priority', [])
                 priority_mode = profile_stream_checking.get('m3u_priority_mode', 'absolute')
@@ -1084,11 +1086,13 @@ class CheckerConcurrentChannelMixin:
                 included_ids = {item.get('stream_id') for item in inspection_candidates}
                 inspection_candidates.extend(item for item in results if item.get('stream_id') not in included_ids)
 
-            # Apply stream limit if configured in profile
-            if stream_limit > 0 and len(analyzed_streams) > stream_limit:
-                removed_count = len(analyzed_streams) - stream_limit
-                logger.info(f"Applying profile stream limit: Keeping top {stream_limit} streams, removing {removed_count}")
-                analyzed_streams = analyzed_streams[:stream_limit]
+            # Apply profile limits to the full ranked candidate list before any
+            # global truncation can discard streams from other providers.
+            analyzed_streams = self._select_profile_streams(
+                analyzed_streams, streams, current_stream_ids,
+                protected_active_stream_ids, stream_limit, provider_stream_limit,
+                dead_stream_ids if dead_stream_removal_enabled else set(),
+            )
 
             report_analyzed_streams = list(analyzed_streams)
 
@@ -1153,6 +1157,9 @@ class CheckerConcurrentChannelMixin:
                 reordered_ids,
                 stream_limit,
                 protected_active_stream_ids,
+                provider_stream_limit=provider_stream_limit,
+                stream_provider_ids={item['id']: self._get_stream_m3u_account_id(item)
+                                     for item in streams},
             )
 
             write_back_valid_stream_ids = self._build_write_back_valid_stream_ids(
