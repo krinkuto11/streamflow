@@ -23,6 +23,7 @@ from dotenv import load_dotenv, set_key
 from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.core.logging_config import setup_logging, log_api_request, log_api_response
 from apps.core.retry_after import retry_after_seconds
+from apps.core.dispatcharr_access import DispatcharrAccessError, probe_admin_access
 
 logger = setup_logging(__name__)
 
@@ -90,17 +91,17 @@ def _validate_auth_headers(headers: Dict[str, str], cache_key: Optional[str] = N
         logger.debug(f"Dispatcharr auth validation cache expired (age: {age:.1f}s)")
 
     try:
-        test_url = f"{base_url}/api/channels/channels/"
-        log_api_request(logger, "GET", test_url, params={"page_size": 1})
+        test_url = f"{base_url.rstrip('/')}/api/accounts/users/me/"
+        log_api_request(logger, "GET", test_url)
         start = time.time()
-        resp = requests.get(test_url, headers=headers, timeout=5, params={"page_size": 1})
+        probe_admin_access(base_url, headers, get=requests.get, timeout=5)
         elapsed = time.time() - start
-        log_api_response(logger, "GET", test_url, resp.status_code, elapsed)
-
-        if resp.status_code == 200:
-            _token_validation_cache[cache_key] = start
-            logger.debug(f"Dispatcharr auth validated and cached for {TOKEN_VALIDATION_TTL}s")
-            return True
+        log_api_response(logger, "GET", test_url, 200, elapsed)
+        _token_validation_cache[cache_key] = start
+        logger.debug(f"Dispatcharr admin auth validated and cached for {TOKEN_VALIDATION_TTL}s")
+        return True
+    except DispatcharrAccessError as exc:
+        logger.warning("%s", exc)
         _token_validation_cache.pop(cache_key, None)
         return False
     except Exception:

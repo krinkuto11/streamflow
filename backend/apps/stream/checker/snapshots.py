@@ -190,6 +190,7 @@ class CheckerSnapshotsMixin:
                 "quality_rules_enabled": bool(checking_enabled),
                 "check_all_streams": bool(stream_checking.get("check_all_streams", False)),
                 "stream_limit": stream_checking.get("stream_limit", 0),
+                "provider_stream_limit": stream_checking.get("provider_stream_limit", 0),
             }],
             "effective_profile_count": 1 if profile_name or profile_id else 0,
             "channel_count": 1,
@@ -199,6 +200,7 @@ class CheckerSnapshotsMixin:
                 "enabled": bool(checking_enabled),
                 "check_all_streams": bool(stream_checking.get("check_all_streams", False)),
                 "stream_limit": stream_checking.get("stream_limit", 0),
+                "provider_stream_limit": stream_checking.get("provider_stream_limit", 0),
             }],
             "capacity_profile_context": {
                 "type": "provider_account_profiles",

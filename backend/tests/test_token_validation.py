@@ -44,6 +44,7 @@ class TestTokenValidation(unittest.TestCase):
         # Mock successful API response
         mock_response = Mock()
         mock_response.status_code = 200
+        mock_response.json.return_value = {"user_level": 10}
         mock_get.return_value = mock_response
         
         result = _validate_token('valid_token_123')
@@ -52,7 +53,7 @@ class TestTokenValidation(unittest.TestCase):
         # Verify the API was called with correct parameters
         mock_get.assert_called_once()
         call_args = mock_get.call_args
-        self.assertIn('test.com/api/channels/channels/', call_args[0][0])
+        self.assertIn('test.com/api/accounts/users/me/', call_args[0][0])
         self.assertIn('Authorization', call_args[1]['headers'])
         self.assertEqual(call_args[1]['headers']['Authorization'], 'Bearer valid_token_123')
     
@@ -155,6 +156,7 @@ class TestTokenValidationCaching(unittest.TestCase):
         # Mock successful API response
         mock_response = Mock()
         mock_response.status_code = 200
+        mock_response.json.return_value = {"user_level": 10}
         mock_get.return_value = mock_response
         
         # First call should make an API request
@@ -182,6 +184,7 @@ class TestTokenValidationCaching(unittest.TestCase):
         # Mock successful API response
         mock_response = Mock()
         mock_response.status_code = 200
+        mock_response.json.return_value = {"user_level": 10}
         mock_get.return_value = mock_response
         
         # First call at time 0
@@ -213,6 +216,7 @@ class TestTokenValidationCaching(unittest.TestCase):
         mock_time.return_value = 0
         mock_response_success = Mock()
         mock_response_success.status_code = 200
+        mock_response_success.json.return_value = {"user_level": 10}
         mock_get.return_value = mock_response_success
         
         result1 = _validate_token('valid_token_123')

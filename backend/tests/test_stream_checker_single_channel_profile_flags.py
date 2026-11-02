@@ -421,6 +421,7 @@ class TestSingleChannelM3uUpdateFlagDisabled(unittest.TestCase):
         profile['name'] = 'V7 Snapshot Profile'
         profile['stream_checking']['check_all_streams'] = True
         profile['stream_checking']['stream_limit'] = 4
+        profile['stream_checking']['provider_stream_limit'] = 2
         channel_id = 52
         streams = [{'id': 11, 'url': 'http://x/11', 'm3u_account': 5, 'stream_stats': {}}]
 
@@ -469,6 +470,7 @@ class TestSingleChannelM3uUpdateFlagDisabled(unittest.TestCase):
         self.assertEqual(snapshot['start_source'], 'manual_forced_profile')
         self.assertEqual(snapshot['effective_profiles'][0]['profile_name'], 'V7 Snapshot Profile')
         self.assertEqual(snapshot['quality_rules'][0]['stream_limit'], 4)
+        self.assertEqual(snapshot['quality_rules'][0]['provider_stream_limit'], 2)
         self.assertEqual(snapshot['capacity_profile_context']['type'], 'provider_account_profiles')
         self.assertEqual(snapshot['result_summary']['channels_hidden'], 1)
         self.assertEqual(snapshot['result_summary']['channels_ready'], 0)

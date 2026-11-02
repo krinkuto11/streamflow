@@ -1858,6 +1858,7 @@ class AutomatedStreamManager:
                 "quality_rules_name": (profile.get("name") if isinstance(profile, dict) else None) or data.get("profile_name") or "Default",
                 "check_all_streams": bool(stream_checking.get("check_all_streams", False)),
                 "stream_limit": stream_checking.get("stream_limit", 0),
+                "provider_stream_limit": stream_checking.get("provider_stream_limit", 0),
             })
         return items
 

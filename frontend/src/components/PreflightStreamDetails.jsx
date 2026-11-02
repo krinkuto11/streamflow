@@ -3,7 +3,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { Badge } from '@/components/ui/badge.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { teamarrPreflightAPI } from '@/services/api.js'
-import { preflightAction, preflightOrderLabels, preflightScore, preflightStreamStatus } from '@/lib/preflight-stream-details.js'
+import { preflightAction, preflightMeasurementTime, preflightOrderLabels, preflightScore, preflightStreamStatus } from '@/lib/preflight-stream-details.js'
 
 export function PreflightStreamDetails({ event }) {
   const inspectionId = event?.details?.inspection_id
@@ -61,6 +61,7 @@ export function PreflightStreamDetails({ event }) {
                     <div className="flex flex-wrap gap-1"><Badge variant={status.variant}>{status.label}</Badge><Badge variant="outline">{preflightAction(stream)}</Badge></div>
                     {stream.reason && <p className="break-words text-xs text-muted-foreground">{stream.reason.replaceAll('_', ' ')}</p>}
                     {stream.measurement_source !== 'current_check' && <p className="text-xs text-muted-foreground">{stream.measurement_source === 'previous_measurement' ? 'Previous measurement · not rechecked' : 'No current measurement'}</p>}
+                    {preflightMeasurementTime(stream.measurement_checked_at) && <p className="text-xs text-muted-foreground">Previous successful check: {preflightMeasurementTime(stream.measurement_checked_at)}</p>}
                   </div>
                   <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
                     <div><dt className="text-muted-foreground">Resolution</dt><dd>{stream.resolution || 'N/A'}</dd></div>

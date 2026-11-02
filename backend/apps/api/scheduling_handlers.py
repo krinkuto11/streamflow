@@ -16,6 +16,7 @@ from apps.api.schemas import (
 )
 from apps.core.api_responses import error_response
 from apps.core.exceptions import ValidationError
+from apps.automation.epg_snapshot import EpgSnapshotIncompleteError
 
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,8 @@ def get_channel_programs_response(*, channel_id: int, get_scheduling_service: Ca
         service = get_scheduling_service()
         programs = service.get_programs_by_channel(channel_id)
         return jsonify(programs)
+    except EpgSnapshotIncompleteError as exc:
+        return error_response(str(exc), status_code=503, code="epg_snapshot_incomplete")
     except NoTvgIdError as exc:
         # SCH-002: surface missing TVG-ID as a structured response
         return jsonify({
@@ -257,6 +260,8 @@ def test_auto_create_rule_response(*, payload: Any, get_scheduling_service: Call
         )
         return jsonify(result)
 
+    except EpgSnapshotIncompleteError as exc:
+        return error_response(str(exc), status_code=503, code="epg_snapshot_incomplete")
     except NoTvgIdError as exc:
         # SCH-002: channel has no TVG-ID — return structured 200 so the frontend
         # shows a specific actionable message instead of generic "No Matches".
@@ -416,7 +421,7 @@ def stop_scheduled_event_processor_api_response(*, stop_scheduled_event_processo
         return jsonify({"error": "Internal Server Error"}), 500
 
 
-def get_epg_refresh_processor_status_response(*, epg_refresh_thread: Any, epg_refresh_running: bool):
+def get_epg_refresh_processor_status_response(*, epg_refresh_thread: Any, epg_refresh_running: bool, get_scheduling_service=None):
     """Handle retrieval of EPG refresh processor status."""
     try:
         thread_alive = (
@@ -425,7 +430,10 @@ def get_epg_refresh_processor_status_response(*, epg_refresh_thread: Any, epg_re
             and epg_refresh_thread.is_alive()
         )
         is_running = thread_alive and epg_refresh_running
-        return jsonify({"running": is_running, "thread_alive": thread_alive}), 200
+        status = {"running": is_running, "thread_alive": thread_alive}
+        if get_scheduling_service is not None:
+            status["snapshot"] = get_scheduling_service().get_epg_snapshot_status()
+        return jsonify(status), 200
     except Exception as exc:
         logger.error(f"Error getting EPG refresh processor status: {exc}")
         return jsonify({"error": "Internal Server Error"}), 500

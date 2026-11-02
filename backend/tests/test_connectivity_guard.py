@@ -18,6 +18,9 @@ class _Response:
     def __init__(self, status_code):
         self.status_code = status_code
 
+    def json(self):
+        return {"user_level": 10}
+
 
 class _ResolvingSocket:
     def getaddrinfo(self, *args, **kwargs):
@@ -35,7 +38,7 @@ class _RequestsOk:
 
     def get(self, url, **kwargs):
         self.urls.append(url)
-        if "channels/channels" in url:
+        if "accounts/users/me" in url:
             return _Response(200)
         return _Response(204)
 
@@ -47,7 +50,7 @@ class _RequestsAuthRefresh:
 
     def get(self, url, **kwargs):
         self.urls.append(url)
-        if "channels/channels" not in url:
+        if "accounts/users/me" not in url:
             return _Response(204)
 
         self.dispatcharr_attempts += 1
@@ -63,7 +66,7 @@ class _RequestsDispatcharrTimeoutThenOk:
 
     def get(self, url, **kwargs):
         self.urls.append(url)
-        if "channels/channels" not in url:
+        if "accounts/users/me" not in url:
             return _Response(204)
 
         self.dispatcharr_attempts += 1
@@ -77,7 +80,7 @@ class _RequestsDispatcharrAlwaysTimeout:
         self.dispatcharr_attempts = 0
 
     def get(self, url, **kwargs):
-        if "channels/channels" not in url:
+        if "accounts/users/me" not in url:
             return _Response(204)
 
         self.dispatcharr_attempts += 1
@@ -89,7 +92,7 @@ class _RequestsDispatcharrRequiresLongBudget:
         self.dispatcharr_timeouts = []
 
     def get(self, url, **kwargs):
-        if "channels/channels" not in url:
+        if "accounts/users/me" not in url:
             return _Response(204)
 
         timeout = kwargs.get("timeout")
@@ -101,7 +104,7 @@ class _RequestsDispatcharrRequiresLongBudget:
 
 class _RequestsUnauthorized:
     def get(self, url, **kwargs):
-        if "channels/channels" in url:
+        if "accounts/users/me" in url:
             return _Response(403)
         return _Response(204)
 
@@ -124,7 +127,7 @@ def test_connectivity_guard_passes_when_internet_and_dispatcharr_are_reachable()
     assert result.reason == "ok"
     assert requests_ok.urls == [
         "https://probe.example/generate_204",
-        "http://dispatcharr.local/api/channels/channels/?page=1&page_size=1",
+        "http://dispatcharr.local/api/accounts/users/me/",
     ]
     assert result.details["dispatcharr_api"]["api_reachable"] is True
     assert result.details["dispatcharr_api"]["destructive_writes_allowed"] is True

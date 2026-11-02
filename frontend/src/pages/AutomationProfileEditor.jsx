@@ -39,6 +39,7 @@ const DEFAULT_PROFILE = {
         blank_check_enabled: false,
         freeze_check_enabled: false,
         stream_limit: 0,
+        provider_stream_limit: 0,
         min_resolution: 'any',
         min_fps: 0,
         min_bitrate: 0,
@@ -551,6 +552,21 @@ export default function AutomationProfileEditor() {
                                                     onChange={(e) => updateProfile('stream_checking.stream_limit', parseInt(e.target.value) || 0)}
                                                 />
                                                 <p className="text-[10px] text-muted-foreground">0 = Unlimited (Keep All Streams)</p>
+                                            </div>
+
+                                            <div className="space-y-2">
+                                                <Label htmlFor="provider_stream_limit">Provider Stream Cap</Label>
+                                                <Input
+                                                    id="provider_stream_limit"
+                                                    type="number"
+                                                    min="0"
+                                                    step="1"
+                                                    value={profile.stream_checking.provider_stream_limit ?? 0}
+                                                    onChange={(e) => updateProfile('stream_checking.provider_stream_limit', Math.max(0, parseInt(e.target.value) || 0))}
+                                                />
+                                                <p className="text-[10px] text-muted-foreground">
+                                                    0 = Disabled. Prefer up to this many streams per provider, then fill remaining channel slots with the best eligible streams even above this cap. Requires a Stream Limit per Channel greater than 0.
+                                                </p>
                                             </div>
 
                                             <div className="space-y-2">

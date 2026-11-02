@@ -368,8 +368,10 @@ describe('operatorHelpSections', () => {
     )
 
     expect(references.map(reference => `${reference.topicId}:${reference.settingName}`)).toEqual([
+      'automation-periods:Provider Stream Cap',
       'automation-periods:Run all due periods',
       'automation-periods:Catch-up cap',
+      'teamarr-preflight:Skip Known Good Streams',
       'teamarr-preflight:Post-Start Checks',
     ])
 

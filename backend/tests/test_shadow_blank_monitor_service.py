@@ -879,7 +879,7 @@ def test_shadow_loop_detection_switches_after_required_confirmation(tmp_path):
     assert service._probe_target_once(udi, target, config) is False
 
     assert loop_calls == [
-        ("http://dispatcharr.local/proxy/ts/stream/uuid-1", 180),
+        ("http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts", 180),
         ("http://provider.example/new.ts", 180),
     ]
     assert switch_calls == [("uuid-1", 11, None)]
@@ -967,9 +967,9 @@ def test_shadow_loop_confirmation_survives_one_probe_ok_miss(tmp_path):
     assert service._probe_target_once(udi, target, config) is False
 
     assert loop_calls == [
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         "http://provider.example/new.ts",
     ]
     assert switch_calls == [("uuid-1", 11, None)]
@@ -1033,7 +1033,7 @@ def test_shadow_loop_probe_aborts_when_real_viewer_leaves(tmp_path):
 
     assert service._probe_target_once(udi, target, config) is False
 
-    assert loop_calls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert loop_calls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts"]
     assert switch_calls == []
     status = service.get_status()
     assert status["recent_events"][0]["type"] == "viewer_left"
@@ -1098,13 +1098,13 @@ def test_continuous_shadow_loop_probe_is_time_sliced(tmp_path, monkeypatch):
     }
 
     result = service._run_loop_probe_if_enabled(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         target,
         config,
         udi=udi,
     )
 
-    assert loop_calls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert loop_calls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts"]
     assert result["loop_probe_ran"] is True
     assert result["loop_detected"] is False
     assert result["loop_probe_sliced"] is True
@@ -1462,7 +1462,7 @@ def test_shadow_loop_dry_run_records_intended_switch_without_live_change(tmp_pat
     status = service.run_once(force=True)
 
     assert loop_calls == [
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         "http://provider.example/new.ts",
     ]
     assert switch_calls == []
@@ -1950,7 +1950,7 @@ def test_freeze_detection_config_and_probe_command():
     })
 
     command, duration = ShadowBlankMonitorService._blank_probe_command(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         config,
     )
 
@@ -1967,11 +1967,11 @@ def test_continuous_probe_command_keeps_connection_open():
     })
 
     periodic_command, _ = ShadowBlankMonitorService._blank_probe_command(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         config,
     )
     continuous_command, _ = ShadowBlankMonitorService._blank_probe_command(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         config,
         continuous=True,
     )
@@ -2033,7 +2033,7 @@ def test_continuous_probe_detects_open_blank_after_min_duration(tmp_path, monkey
     })
 
     result = service._run_blank_probe_until_viewer_left(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         config,
         udi,
         {
@@ -2127,7 +2127,7 @@ def test_shadow_probe_flushes_delayed_blackdetect_at_analysis_window(tmp_path, m
     })
 
     result = service._run_blank_probe_until_viewer_left(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         config,
         udi,
         {
@@ -2220,7 +2220,7 @@ def test_shadow_probe_ignores_short_broadcast_black_segment_below_ratio_gate(tmp
     })
 
     result = service._run_blank_probe_until_viewer_left(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         config,
         udi,
         {
@@ -2287,7 +2287,7 @@ def test_continuous_probe_waits_for_open_freeze_ratio_threshold(tmp_path, monkey
     })
 
     result = service._run_blank_probe_until_viewer_left(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         config,
         udi,
         {
@@ -2356,7 +2356,7 @@ def test_continuous_probe_detects_no_decodable_frames_after_min_duration(tmp_pat
     })
 
     result = service._run_blank_probe_until_viewer_left(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         config,
         udi,
         {
@@ -2430,7 +2430,7 @@ def test_continuous_probe_detects_audio_only_no_decoded_video_frames(tmp_path, m
     })
 
     result = service._run_blank_probe_until_viewer_left(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         config,
         udi,
         {
@@ -2609,7 +2609,7 @@ def test_continuous_probe_holds_ffmpeg_until_viewer_leaves(tmp_path, monkeypatch
     }
 
     result = service._run_blank_probe_until_viewer_left(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         config,
         udi,
         target,
@@ -2692,7 +2692,7 @@ def test_bounded_probe_aborts_when_viewer_leaves_with_loop_detection(tmp_path, m
     }
 
     result = service._run_blank_probe_until_viewer_left(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         config,
         udi,
         target,
@@ -2758,7 +2758,7 @@ def test_continuous_probe_treats_aggregate_only_single_client_as_viewer_left(tmp
     }
 
     result = service._run_blank_probe_until_viewer_left(
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
         config,
         udi,
         target,
@@ -2894,8 +2894,8 @@ def test_forced_discovery_can_scope_to_included_channels_without_persisting_conf
     )
 
     assert probe_urls == [
-        "http://dispatcharr.local/proxy/ts/stream/uuid-2",
-        "http://dispatcharr.local/proxy/ts/stream/uuid-3",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-2?output_format=mpegts",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-3?output_format=mpegts",
     ]
     assert status["watched_count"] == 2
     assert all(target["real_client_count"] == 1 for target in status["watched_channels"])
@@ -2920,7 +2920,7 @@ def test_dry_run_uses_channel_proxy_and_records_intended_switch(tmp_path):
 
     status = service.run_once(force=True)
 
-    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts"]
     assert switch_calls == []
     assert status["recent_events"][0]["type"] == "dry_run_switch"
     assert status["recent_events"][0]["decision_group"] == "switch"
@@ -3029,7 +3029,7 @@ def test_shadow_probe_does_not_mirror_watcher_or_invalid_output_format(tmp_path)
     watcher_contaminated_status = active_status(
         stream_id=10,
         clients=[
-            {"user_agent": "VLC", "output_format": "hls"},
+            {"user_agent": "VLC", "output_format": "unsupported-format"},
             {"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0", "output_format": "fmp4"},
         ],
     )
@@ -3037,7 +3037,7 @@ def test_shadow_probe_does_not_mirror_watcher_or_invalid_output_format(tmp_path)
         statuses=[{
             "uuid-1": active_status(
                 stream_id=10,
-                clients=[{"user_agent": "VLC", "output_format": "hls"}],
+                clients=[{"user_agent": "VLC", "output_format": "unsupported-format"}],
             ),
         }],
         channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
@@ -3053,7 +3053,7 @@ def test_shadow_probe_does_not_mirror_watcher_or_invalid_output_format(tmp_path)
 
     status = service.run_once(force=True)
 
-    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts"]
     assert "viewer_output_format" not in status["watched_channels"][0]
 
 
@@ -5879,7 +5879,7 @@ def test_clean_low_impact_probe_waits_when_current_probe_client_is_still_visible
     status = service.get_status()
     watched = status["watched_channels"][0]
 
-    assert probe_calls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert probe_calls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts"]
     assert wait_calls == [45]
     assert watched["watcher_state"] == "waiting"
     assert watched["watcher_client_count"] == 0
@@ -6702,9 +6702,9 @@ def test_max_watchers_probe_targets_in_parallel(tmp_path):
 
     assert len(probe_order) == 3
     assert sorted(probe_order) == [
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
-        "http://dispatcharr.local/proxy/ts/stream/uuid-2",
-        "http://dispatcharr.local/proxy/ts/stream/uuid-3",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-2?output_format=mpegts",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-3?output_format=mpegts",
     ]
     assert [event["type"] for event in status["recent_events"][:3]] == ["probe_ok"] * 3
 
@@ -6741,7 +6741,7 @@ def test_existing_watcher_client_prevents_duplicate_probe(tmp_path):
 
     status = service.run_once(force=True)
 
-    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-2"]
+    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-2?output_format=mpegts"]
     assert status["watched_count"] == 2
     assert status["recent_events"][0]["type"] == "probe_ok"
 
@@ -7150,7 +7150,7 @@ def test_persistent_watcher_does_not_block_followup_media_probe(tmp_path):
 
     service._probe_targets(udi, [target], config, single_pass=True)
 
-    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts"]
     assert "watcher_orphaned" not in [event["type"] for event in service.get_status()["recent_events"]]
 
 
@@ -7875,8 +7875,8 @@ def test_scoped_continuous_mode_reprobes_orphaned_watcher_and_uncovered_target(t
     )
 
     assert probe_urls == [
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
-        "http://dispatcharr.local/proxy/ts/stream/uuid-2",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-2?output_format=mpegts",
     ]
     assert status["watched_count"] == 2
     assert "watcher_orphaned" in [event["type"] for event in status["recent_events"]]
@@ -8129,7 +8129,7 @@ def test_quality_checker_guard_is_opt_in(tmp_path):
 
     status = service.run_once(force=True)
 
-    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts"]
     assert status["recent_events"][0]["type"] == "probe_ok"
 
 
@@ -8160,7 +8160,7 @@ def test_quality_checker_state_does_not_pause_shadow_probe(tmp_path):
     status = service.run_once(force=True)
 
     assert service.get_config()["skip_during_quality_check"] is False
-    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts"]
     assert status["recent_events"][0]["type"] == "probe_ok"
 
 
@@ -8705,7 +8705,7 @@ def test_persistent_watcher_popen_race_rechecks_revision_and_scope(tmp_path, mon
 
     start_thread = threading.Thread(
         target=service._start_persistent_watcher,
-        args=("uuid-1", target, config, "http://dispatcharr.local/proxy/ts/stream/uuid-1"),
+        args=("uuid-1", target, config, "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts"),
     )
     start_thread.start()
     assert popen_entered.wait(timeout=1)
@@ -8782,7 +8782,7 @@ def test_scope_update_completed_before_persistent_watcher_admission_prevents_pop
 
     start_thread = threading.Thread(
         target=service._start_persistent_watcher,
-        args=("uuid-1", target, stale_config, "http://dispatcharr.local/proxy/ts/stream/uuid-1"),
+        args=("uuid-1", target, stale_config, "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts"),
     )
     start_thread.start()
     assert command_entered.wait(timeout=1)
@@ -8832,7 +8832,7 @@ def test_persistent_watcher_config_rotation_terminates_old_revision_before_put_r
         "uuid-1",
         target,
         service.get_config(include_secret=True),
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
     )
     old_process = starts[0][1]
 
@@ -8850,7 +8850,7 @@ def test_persistent_watcher_config_rotation_terminates_old_revision_before_put_r
         "uuid-1",
         target,
         service.get_config(include_secret=True),
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts",
     )
     new_command = " ".join(starts[1][0])
     assert "new-watcher-key" in new_command

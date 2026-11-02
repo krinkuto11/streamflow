@@ -15,13 +15,13 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from urllib.parse import urljoin
 
 from apps.core.logging_config import setup_logging
 from apps.udi import get_udi_manager
 from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.core.api_utils import fetch_data_from_url, post_request
 from apps.automation.regex_validation import is_dangerous_regex
+from apps.automation.epg_snapshot import EpgSnapshotIncompleteError, fetch_program_window
 
 logger = setup_logging(__name__)
 
@@ -94,6 +94,7 @@ class SchedulingService:
         """Initialize the scheduling service."""
         self._lock = threading.RLock()
         self._epg_all_programs_cache: Optional[Dict[str, Any]] = None
+        self._epg_snapshot_status: Dict[str, Any] = {"complete": None, "reason": "not_fetched"}
         self._epg_cache: Dict[str, Any] = {}
         self._epg_cache_time: Optional[datetime] = None
         self._config = self._load_config()
@@ -1089,8 +1090,11 @@ class SchedulingService:
         ):
             self._append_unique_identifier(identifiers, self._channel_uuid_lookup_id(program.get(key)))
 
-        channel = program.get('channel')
-        if isinstance(channel, dict):
+        mapped_channels = program.get('channels')
+        channels = [program.get('channel')] + (mapped_channels if isinstance(mapped_channels, list) else [])
+        for channel in channels:
+            if not isinstance(channel, dict):
+                continue
             for key in ('tvg_id', 'tvgId', 'effective_tvg_id', 'station_id', 'stationId'):
                 self._append_unique_identifier(identifiers, channel.get(key))
             for key in ('id', 'channel_id', 'channelId', 'dispatcharr_channel_id'):
@@ -2243,13 +2247,11 @@ class SchedulingService:
     def _get_auth_token(self) -> Optional[str]:
         return os.getenv("DISPATCHARR_TOKEN")
 
-    def _fetch_and_cache_all_programs(self, force_refresh: bool = False) -> Dict[str, List[Dict[str, Any]]]:
-        """Fetch ALL EPG programs in one HTTP call and return them grouped by EPG identifier.
+    def _fetch_and_cache_all_programs(self, force_refresh: bool = False, hours_ahead: int = 24) -> Dict[str, List[Dict[str, Any]]]:
+        """Cache a complete, time-bounded guide shared by all rule channels.
 
-        SCH-001: Dispatcharr ignores tvg_id/start_time filter params, returning the
-        full program list regardless. Fetching once and grouping client-side is
-        therefore strictly equivalent to N per-channel fetches but costs one
-        round-trip instead of N.
+        The /search/ action applies time filters; the legacy list action does
+        not. Ended guide history is never fetched into the Auto-Create cache.
 
         Lock discipline: _lock is never held during the HTTP call. Only the cache
         read-check and the cache write use short critical sections, so callers
@@ -2281,11 +2283,17 @@ class SchedulingService:
                 return dict(by_tvg_id)
 
         # Cache check — short critical section, no I/O inside
+        schedule = self.get_epg_schedule()
+        try:
+            cache_minutes = float(schedule.get('value', 60)) if schedule.get('type') == 'interval' else 60.0
+        except (TypeError, ValueError):
+            cache_minutes = 60.0
+        refresh_interval = timedelta(minutes=max(1.0, min(1440.0, cache_minutes)))
+
         with self._lock:
             if not force_refresh and self._epg_all_programs_cache:
                 cache_age = datetime.now() - self._epg_all_programs_cache['time']
-                refresh_interval = timedelta(minutes=self.get_epg_schedule().get('value', 60))
-                if cache_age < refresh_interval:
+                if cache_age < refresh_interval and self._epg_all_programs_cache.get('hours_ahead', 24) >= hours_ahead:
                     return self._epg_all_programs_cache['by_tvg_id']
             stale_cache = self._epg_all_programs_cache
 
@@ -2297,15 +2305,23 @@ class SchedulingService:
             return stale_cache['by_tvg_id'] if stale_cache else {}
 
         try:
-            url = f"{base_url}/api/epg/programs/"
-            logger.debug("Fetching all EPG programs (shared cache)")
+            url = f"{base_url}/api/epg/programs/search/"
+            logger.debug("Fetching time-bounded EPG programs (shared cache)")
 
             raw, page_count, partial, grid_count, current_count = self._fetch_epg_program_snapshot(
                 base_url,
                 url,
+                # Include the cache lifetime so its far edge still covers the
+                # requested horizon when this snapshot is reused later.
+                hours_ahead=hours_ahead + refresh_interval.total_seconds() / 3600.0,
             )
-            if partial and not raw:
-                return stale_cache['by_tvg_id'] if stale_cache else {}
+            if partial:
+                logger.warning("EPG snapshot incomplete (%s); partial guide was not cached", self.get_epg_snapshot_status().get('reason'))
+                with self._lock:
+                    self._epg_snapshot_status['using_previous_snapshot'] = bool(stale_cache)
+                if stale_cache:
+                    return stale_cache['by_tvg_id']
+                raise EpgSnapshotIncompleteError()
 
             by_tvg_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             skipped = 0
@@ -2334,9 +2350,12 @@ class SchedulingService:
                 self._epg_all_programs_cache = {
                     'time': datetime.now(),
                     'by_tvg_id': result,
+                    'hours_ahead': hours_ahead,
                 }
             return result
 
+        except EpgSnapshotIncompleteError:
+            raise
         except Exception as e:
             logger.error(f"Error fetching all EPG programs: {e}")
             return stale_cache['by_tvg_id'] if stale_cache else {}
@@ -2358,14 +2377,24 @@ class SchedulingService:
         for program in items:
             if not isinstance(program, dict):
                 continue
-            dedup_key = (
-                program.get('id'),
-                program.get('tvg_id'),
-                program.get('channel_uuid') or program.get('channelUuid'),
-                self._program_start_time(program),
-                self._program_end_time(program),
-                self._program_event_title(program),
-            )
+            # Search returns microseconds while the guide rounds the same row
+            # to milliseconds. A Dispatcharr programme id is the authority;
+            # differing timestamp serialization must not create a second event.
+            if program.get('id') is not None:
+                dedup_key = ('program_id', str(program['id']))
+            else:
+                def time_key(value):
+                    try:
+                        return _parse_dt(value).astimezone(timezone.utc).isoformat(timespec='milliseconds')
+                    except (TypeError, ValueError, AttributeError):
+                        return value
+                dedup_key = (
+                    program.get('tvg_id'),
+                    program.get('channel_uuid') or program.get('channelUuid'),
+                    time_key(self._program_start_time(program)),
+                    time_key(self._program_end_time(program)),
+                    self._program_event_title(program),
+                )
             if dedup_key in seen_programs:
                 continue
             seen_programs.add(dedup_key)
@@ -2381,37 +2410,19 @@ class SchedulingService:
             added += 1
         return added
 
-    def _fetch_epg_program_snapshot(self, base_url: str, programs_url: str) -> tuple:
+    def get_epg_snapshot_status(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._epg_snapshot_status)
+
+    def _fetch_epg_program_snapshot(self, base_url: str, _programs_url: str, *, hours_ahead: int = 24) -> tuple:
         raw: List[Dict[str, Any]] = []
         seen_programs = set()
-        next_url: Optional[str] = programs_url
-        seen_urls = set()
-        page_count = 0
-        partial = False
-
-        while next_url and next_url not in seen_urls:
-            seen_urls.add(next_url)
-            data = fetch_data_from_url(next_url)
-            if data is None:
-                logger.error("Failed to fetch EPG programs from Dispatcharr")
-                partial = True
-                break
-
-            if isinstance(data, list):
-                self._merge_program_sources(raw, seen_programs, data, source='programs')
-                next_url = None
-            elif isinstance(data, dict):
-                self._merge_program_sources(raw, seen_programs, data, source='programs')
-                next_value = data.get('next')
-                next_url = urljoin(next_url, str(next_value)) if next_value else None
-            else:
-                logger.warning("Unexpected EPG programs response type: %s", type(data).__name__)
-                next_url = None
-
-            page_count += 1
-            if page_count >= 500:
-                logger.warning("Stopping EPG pagination after 500 pages")
-                break
+        snapshot = fetch_program_window(base_url, fetch_data_from_url, hours_ahead=hours_ahead)
+        with self._lock:
+            self._epg_snapshot_status = snapshot.status()
+        self._merge_program_sources(raw, seen_programs, snapshot.programs, source='programs')
+        if not snapshot.complete:
+            return raw, snapshot.pages, True, 0, 0
 
         grid_url = f"{base_url}/api/epg/grid/"
         grid_data = fetch_data_from_url(grid_url)
@@ -2430,19 +2441,28 @@ class SchedulingService:
         except Exception as exc:
             logger.debug("Unable to fetch current EPG programs for Auto-Create: %s", exc)
 
-        return raw, page_count, partial, grid_count, current_count
+        window_start = _parse_dt(snapshot.start)
+        window_end = _parse_dt(snapshot.end)
+        def in_window(program):
+            try:
+                end = self._program_end_time(program)
+                start = self._program_start_time(program)
+                if end and _parse_dt(end) <= window_start:
+                    return False
+                if start and _parse_dt(start) >= window_end:
+                    return False
+            except (ValueError, TypeError, AttributeError):
+                pass  # Keep malformed times for the existing preview diagnostics.
+            return True
+        raw = [program for program in raw if in_window(program)]
+        return raw, snapshot.pages, False, grid_count, current_count
 
     def fetch_channel_programs_from_api(self, tvg_id: str, hours_ahead: int = 24, force_refresh: bool = False) -> List[Dict[str, Any]]:
-        """Return EPG programs for tvg_id from the shared all-programs cache.
-
-        One HTTP call to /api/epg/programs/ serves all channels for the lifetime
-        of the cache window (see _fetch_and_cache_all_programs). The hours_ahead
-        window is enforced client-side; the API ignores time filter params (SCH-001).
-        """
+        """Return EPG programs from a shared, complete /programs/search/ window."""
         if not tvg_id:
             return []
 
-        by_tvg_id = self._fetch_and_cache_all_programs(force_refresh=force_refresh)
+        by_tvg_id = self._fetch_and_cache_all_programs(force_refresh=force_refresh, hours_ahead=hours_ahead)
         programs = by_tvg_id.get(tvg_id, [])
 
         end_time = datetime.now(timezone.utc) + timedelta(hours=hours_ahead)

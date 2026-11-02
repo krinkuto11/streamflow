@@ -11,7 +11,7 @@ MAX_INSPECTION_STREAMS = 500
 MAX_INSPECTION_BYTES = 256 * 1024
 TEXT_FIELDS = {
     'stream_name', 'provider_name', 'status', 'reason', 'resolution', 'fps',
-    'bitrate', 'video_codec', 'audio_codec', 'action', 'measurement_source',
+    'bitrate', 'video_codec', 'audio_codec', 'action', 'measurement_source', 'measurement_checked_at',
 }
 NUMBER_FIELDS = {'stream_id', 'provider_id', 'score', 'rank', 'candidate_rank', 'provider_rank'}
 
@@ -102,6 +102,7 @@ def build_inspection(*, streams, analyzed, skipped, checked_ids, dead_ids,
         if isinstance(provider_id, dict):
             provider_id = provider_id.get('id')
         row = {
+            'measurement_checked_at': (probe or {}).get('measurement_checked_at'),
             'stream_id': sid, 'stream_name': source.get('name') or (probe or {}).get('stream_name'),
             'provider_id': provider_id, 'provider_name': provider_names.get(sid),
             **metrics, 'status': status,

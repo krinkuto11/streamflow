@@ -30,7 +30,7 @@ profiles for individual channels and groups.
 
 </details>
 
-Screenshots use example data. See the [2.8.0 release notes](docs/release-2.8.0.md)
+Screenshots use example data. See the [2.9.0 release notes](docs/release-2.9.0.md)
 for the current stable release and the [changelog](CHANGELOG.md) for release history.
 
 ## Requirements
@@ -63,7 +63,7 @@ Docker host's address and your configured port when connecting remotely.
 | Image | Purpose |
 | --- | --- |
 | `ghcr.io/krinkuto11/streamflow:latest` | Current stable release |
-| `ghcr.io/krinkuto11/streamflow:2.8.0` | A specific stable release |
+| `ghcr.io/krinkuto11/streamflow:2.9.0` | A specific stable release |
 | `ghcr.io/krinkuto11/streamflow:dev` | Development builds; review changes before updating |
 
 To update the image selected in your Compose file:
