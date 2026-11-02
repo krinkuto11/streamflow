@@ -559,6 +559,15 @@ export const operatorHelpDetailTopics = [
         risk: 'Too early can check placeholder or missing streams.',
       },
       {
+        name: 'Skip Known Good Streams',
+        controlType: 'Visible UI setting',
+        defaultValue: 'Off',
+        location: 'Teamarr Preflight -> Configuration card -> Skip Known Good Streams',
+        effect: 'After the first check of an event, reuses complete successful measurements for unchanged sources and profiles. Failed, low-quality, incomplete, new, changed or stale sources still receive fresh checks. Manual Force Check always rechecks all sources.',
+        useWhen: 'Enable to reduce repeated probes and provider-slot usage across pre-start and post-start checkpoints of the same event.',
+        risk: 'A source can fail after a successful measurement. Skipped sources are not monitored; details show the previous successful check time. Evidence expires within the event preflight window and is never extended by a cache hit.',
+      },
+      {
         name: 'Pre-Start Retries',
         controlType: 'Visible UI setting',
         defaultValue: '10 min before start; 3 min before start',

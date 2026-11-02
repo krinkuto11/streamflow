@@ -31,6 +31,23 @@ def test_expired_preflight_does_not_read_remote_sources():
     udi.refresh_channel_by_id.assert_not_called()
 
 
+def test_queue_passes_event_context_to_execution_after_live_validation(monkeypatch):
+    preflight = Mock()
+    preflight.validate_queued_check.return_value = None
+    monkeypatch.setattr('apps.stream.teamarr_preflight_service.get_teamarr_preflight_service', lambda: preflight)
+    checker = StreamCheckQueueExecutionMixin()
+    checker.lock = threading.RLock()
+    checker.abort_current_check = threading.Event()
+    checker._should_isolate_teamarr_connectivity_abort = Mock(return_value=False)
+    checker.check_single_channel = Mock(return_value={'success': True})
+    checker._complete_channel_check = Mock(side_effect=lambda cid, callback, **kwargs: callback())
+    metadata = {'source': 'teamarr_preflight', 'preflight_context': {'identity': 'event:1'}, 'event': {}}
+    checker._run_specialized_queue_entry_owned({'channel_id': 77, 'queue_entry_token': 3, 'metadata': metadata})
+    preflight.validate_queued_check.assert_called_once_with(metadata)
+    assert checker.check_single_channel.call_args.kwargs['preflight_context'] == metadata['preflight_context']
+    preflight.record_queued_check_result.assert_called_once_with(metadata, {'success': True})
+
+
 def test_explicit_scan_retains_disabled_automatic_scan_behavior():
     service, metadata, _ = service_and_metadata()
     service.get_config.return_value['enabled'] = False

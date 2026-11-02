@@ -33,6 +33,7 @@ from apps.core.metadata_cache import MetadataCache
 from apps.core.operation_timing import OperationTimings
 from apps.stream.preflight_inspection import public_inspection
 from apps.stream.preflight_policy import latest_due_bucket, preflight_deadline, parse_time
+from apps.stream.preflight_stream_reuse import PreflightStreamReuse, automatic_reuse_context
 
 logger = setup_logging(__name__)
 
@@ -152,6 +153,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
     "managed_event_preflight_enabled": True,
     "static_team_preflight_enabled": False,
+    "skip_known_good_streams": False,
     "teamarr_base_url": "",
     "api_key": "",
     "api_key_header": "X-API-Key",
@@ -249,6 +251,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     config["enabled"] = bool(config.get("enabled"))
     config["managed_event_preflight_enabled"] = bool(config.get("managed_event_preflight_enabled", True))
     config["static_team_preflight_enabled"] = bool(config.get("static_team_preflight_enabled"))
+    config["skip_known_good_streams"] = config.get("skip_known_good_streams") is True
     config["queue_during_active_checks"] = bool(config.get("queue_during_active_checks"))
     config["teamarr_base_url"] = str(config.get("teamarr_base_url") or "").strip().rstrip("/")
     config["api_key"] = str(config.get("api_key") or "").strip()
@@ -367,6 +370,7 @@ class TeamarrPreflightService:
         )
         self.stop_wait_seconds = max(0.1, min(30.0, float(stop_wait_seconds)))
         self.clock = clock
+        self._stream_reuse = PreflightStreamReuse(self.db_provider, self.clock)
 
         self._lock = threading.RLock()
         self._run_once_lock = threading.Lock()
@@ -2233,6 +2237,9 @@ class TeamarrPreflightService:
                 **quality_profile_details,
             },
         }
+        reuse_context = automatic_reuse_context(event, config)
+        if reuse_context is not None:
+            metadata["preflight_context"] = reuse_context
         queued = bool(checker.queue_channel(
             int(channel_id),
             priority=TEAMARR_PREFLIGHT_QUEUE_PRIORITY,
@@ -2408,6 +2415,13 @@ class TeamarrPreflightService:
             },
         )
 
+    def prepare_stream_reuse(self, context, *, channel, streams, profile, analysis_config, accounts, is_good, is_dead):
+        """Resolve evidence at execution time, after the checker refreshes sources."""
+        if not self.get_config().get("skip_known_good_streams"):
+            return None
+        return self._stream_reuse.prepare(context, channel, streams, profile,
+                                          analysis_config, accounts, is_good, is_dead)
+
     def _run_check(self, key: str, event: Dict[str, Any], config: Dict[str, Any]) -> None:
         try:
             current_config = self.get_config(include_secret=True)
@@ -2425,6 +2439,7 @@ class TeamarrPreflightService:
             checker = self.stream_checker_provider()
             forced_profile_id = self._resolve_profile_id(config.get("forced_profile_id"))
             quality_profile_details = self._quality_profile_details(forced_profile_id)
+            reuse_context = automatic_reuse_context(event, config)
             result = checker.check_single_channel(
                 int(event["dispatcharr_channel_id"]),
                 program_name=event.get("event_name"),
@@ -2432,6 +2447,7 @@ class TeamarrPreflightService:
                 forced_profile_id=forced_profile_id,
                 force_check=True,
                 run_mode="teamarr_preflight",
+                **({"preflight_context": reuse_context} if reuse_context is not None else {}),
             )
             deferral_reason = self._controlled_deferral_reason(result)
             if deferral_reason:

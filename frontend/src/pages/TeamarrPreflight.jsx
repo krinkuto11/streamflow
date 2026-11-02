@@ -1082,6 +1082,23 @@ export default function TeamarrPreflight() {
               </div>
             </div>
 
+            <div className="flex items-start justify-between gap-5 rounded-md border border-border p-4" data-testid="preflight-stream-reuse-setting">
+              <div className="min-w-0 space-y-1">
+                <Label htmlFor="skip-known-good-streams" className="text-base">Skip Known Good Streams</Label>
+                <p className="text-sm leading-snug text-muted-foreground">
+                  Reuse successful measurements at later checkpoints of the same event. Failed, incomplete,
+                  new, changed or stale sources are checked again. Off by default.
+                </p>
+                <p className="text-xs text-muted-foreground">Skipped sources can fail later. Use Force Check to recheck every source.</p>
+              </div>
+              <Switch
+                id="skip-known-good-streams"
+                className="mt-1 shrink-0"
+                checked={editedConfig.skip_known_good_streams === true}
+                onCheckedChange={(value) => updateConfigValue('skip_known_good_streams', value)}
+              />
+            </div>
+
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2 md:col-span-2">
                 <Label>Teamarr Base URL</Label>

@@ -78,6 +78,85 @@ def _make_bitrate_runtime_udi(channel_id, streams, profiles=None):
     return udi
 
 
+@pytest.mark.parametrize('sequential,all_good,manual', [(False, True, False), (True, True, False),
+                                                      (False, False, False), (True, False, False),
+                                                      (False, True, True)])
+def test_preflight_reuse_avoids_probes_and_keeps_cached_ranking(monkeypatch, sequential, all_good, manual):
+    from types import SimpleNamespace
+    from apps.stream.stream_checker_service import StreamCheckerService
+    from apps.stream.preflight_stream_reuse import PreflightStreamReuse, automatic_reuse_context
+    from apps.stream.teamarr_preflight_service import normalize_config
+
+    clock = 1700000000
+    profile = {'id': 'preflight', 'name': 'Preflight', 'stream_checking': {
+        'enabled': True, 'stream_limit': 0, 'remove_dead_streams': False,
+        'min_bitrate': 2000, 'm3u_priority_mode': 'quality', 'allow_revive': True,
+    }}
+    fresh = {sid: {'stream_id': sid, 'stream_name': f'Feed {sid}',
+                  'stream_url': f'http://provider.invalid/{sid}',
+                  'resolution': '1920x1080', 'fps': 50, 'bitrate_kbps': 6000 - sid * 1000,
+                  'video_codec': 'h264', 'audio_codec': 'aac'} for sid in (1, 2)}
+    streams = [{'id': sid, 'name': f'Feed {sid}', 'url': f'http://provider.invalid/{sid}',
+                'm3u_account': 1, 'stream_stats': deepcopy(fresh[sid])} for sid in (1, 2)]
+    udi = _make_bitrate_runtime_udi(77, streams)
+    automation = Mock(get_profile=Mock(return_value=profile))
+    service = StreamCheckerService()
+    _configure_bitrate_runtime_service(service, {'channels': {}})
+    monkeypatch.setattr('apps.stream.stream_checker_service.get_udi_manager', lambda: udi)
+    monkeypatch.setattr('apps.stream.stream_checker_service.get_automation_config_manager', lambda: automation)
+    monkeypatch.setattr('apps.stream.stream_checker_service.fetch_channel_streams', lambda cid: streams)
+    monkeypatch.setattr('apps.stream.stream_checker_service._get_base_url', lambda: 'http://dispatcharr.invalid')
+    monkeypatch.setattr('apps.stream.stream_checker_service.batch_update_stream_stats', Mock(return_value=(2, 0)))
+    monkeypatch.setattr('apps.stream.stream_checker_service.update_channel_streams', Mock(return_value=True))
+    monkeypatch.setattr('apps.stream.stream_checker_service.get_session_manager', lambda: Mock(
+        is_channel_in_active_session=Mock(return_value=False)))
+    service._require_quality_check_connectivity = Mock(return_value=None)
+    service._check_channel_limits = Mock(return_value=None)
+    service._get_active_viewer_protected_stream_ids = Mock(return_value=set())
+    service._run_deferred_bitrate_rechecks = Mock()
+    inventory = Mock(wraps=service._initialize_provider_probe_account_inventory)
+    service._initialize_provider_probe_account_inventory = inventory
+    state = {}
+    db = Mock(get_system_setting=lambda key, default: deepcopy(state.get(key, default)),
+              set_system_setting=lambda key, value: state.update({key: deepcopy(value)}))
+    store = PreflightStreamReuse(lambda: db, lambda: clock)
+    context = automatic_reuse_context({'identity': 'game:1', 'event_date': '2023-11-14T22:33:20+00:00',
+                                      'dispatcharr_channel_id': 77, 'trigger_bucket': '20m'},
+                                     normalize_config({'skip_known_good_streams': True}))
+    initial = store.prepare(context, udi.get_channel_by_id(77), streams, profile,
+                            service.config.get('stream_analysis', {}), udi.get_m3u_accounts(),
+                            lambda _: True, lambda _: False)
+    initial.finish(list(fresh.values()) if all_good else [fresh[1]], {1, 2} if all_good else {1}, set())
+    adapter = SimpleNamespace(prepare_stream_reuse=lambda context, **kwargs: store.prepare(context=context, **kwargs))
+    monkeypatch.setattr('apps.stream.teamarr_preflight_service.get_teamarr_preflight_service', lambda: adapter)
+    expected_ids = [1, 2] if manual else ([] if all_good else [2])
+    scheduler = Mock()
+    scheduler.check_streams_with_limits.return_value = [deepcopy(fresh[sid]) for sid in expected_ids]
+    factory = Mock(return_value=scheduler)
+    monkeypatch.setattr('apps.stream.concurrent_stream_limiter.get_smart_scheduler', factory)
+    result = service._check_channel_concurrent(
+        77, forced_profile_id='preflight', run_mode='teamarr_preflight', force_check_override=True,
+        global_limit_override=1 if sequential else None,
+        preflight_context=None if manual else context,
+    )
+    assert not result.get('error'), result
+    assert result['good_streams_count'] == 2
+    rows = {row['stream_id']: row for row in result['preflight_inspection']['streams']}
+    assert rows[1]['rank'] == 1 and rows[2]['rank'] == 2
+    if not expected_ids:
+        factory.assert_not_called()
+        inventory.assert_not_called()
+        service._check_channel_limits.assert_not_called()
+    else:
+        assert [stream['id'] for stream in scheduler.check_streams_with_limits.call_args.kwargs['streams']] == expected_ids
+    if not manual:
+        assert rows[1]['reason'] == 'known_good_reused'
+        assert rows[1]['measurement_source'] == 'previous_measurement'
+        assert rows[1]['measurement_checked_at'] == '2023-11-14T22:13:20+00:00'
+    if not all_good or manual:
+        assert rows[2]['measurement_source'] == 'current_check'
+
+
 def _configure_bitrate_runtime_service(service, tracker_updates):
     service.config.config.setdefault('concurrent_streams', {}).update({
         'enabled': True,
