@@ -243,7 +243,7 @@ export const operatorHelpDetailTopics = [
           alt: 'Live dark mode crop of the Provider Stream Cap setting and its ranked backfill explanation.',
           caption: 'Provider Stream Cap is in the profile editor under Stream Checking. Remaining channel slots can exceed this soft cap.',
           width: 415,
-          height: 125,
+          height: 124,
         },
       },
       {
@@ -566,6 +566,14 @@ export const operatorHelpDetailTopics = [
         effect: 'After the first check of an event, reuses complete successful measurements for unchanged sources and profiles. Failed, low-quality, incomplete, new, changed or stale sources still receive fresh checks. Manual Force Check always rechecks all sources.',
         useWhen: 'Enable to reduce repeated probes and provider-slot usage across pre-start and post-start checkpoints of the same event.',
         risk: 'A source can fail after a successful measurement. Skipped sources are not monitored; details show the previous successful check time. Evidence expires within the event preflight window and is never extended by a cache hit.',
+        reference: {
+          imageSrc: '/help/teamarr-preflight-reuse-dark.jpg',
+          triggerLabel: 'UI Screenshot',
+          alt: 'Dark mode crop of the Skip Known Good Streams switch in the live Teamarr Preflight Configuration card.',
+          caption: 'Teamarr Preflight -> Configuration -> Skip Known Good Streams. Off by default; manual Force Check still probes every source.',
+          width: 666,
+          height: 125,
+        },
       },
       {
         name: 'Pre-Start Retries',

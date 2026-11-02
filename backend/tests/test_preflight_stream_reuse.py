@@ -186,7 +186,6 @@ def test_bounded_persistence_keeps_sibling_events(evidence, monkeypatch):
 
 def test_newer_failure_on_transformed_provider_route_prevents_reuse(evidence):
     from types import SimpleNamespace
-    from unittest.mock import Mock
     from apps.stream.stream_checker_service import StreamCheckerService
     checker = StreamCheckerService.__new__(StreamCheckerService)
     checker.dead_streams_tracker = SimpleNamespace(is_dead=lambda url: url == 'https://transformed/failed')
