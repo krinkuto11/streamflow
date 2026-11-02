@@ -26,6 +26,7 @@ class CheckerSingleChannelMixin:
         _operation_already_reserved: bool = False,
         _queue_force_check_generation: Optional[int] = None,
         _queue_entry_token: Optional[int] = None,
+        preflight_context: Optional[Dict] = None,
     ) -> Dict:
         """Check a single channel immediately and return results.
 
@@ -309,7 +310,9 @@ class CheckerSingleChannelMixin:
 
             # Check if channel has active viewers or if its playlist has reached max concurrent streams
             current_streams = self._checker_fetch_channel_streams(channel_id)
-            if current_streams:
+            # Automatic reuse selects probe candidates after the authoritative
+            # channel refresh. Its inner checker enforces limits on that subset.
+            if current_streams and preflight_context is None:
                 limit_check_result = self._check_channel_limits(
                     channel_id,
                     channel_name,
@@ -856,6 +859,8 @@ class CheckerSingleChannelMixin:
                 _check_kwargs['force_check_generation'] = (
                     _queue_force_check_generation
                 )
+                if preflight_context is not None:
+                    _check_kwargs['preflight_context'] = preflight_context
                 if _queue_entry_token is not None:
                     _check_kwargs['queue_entry_token'] = _queue_entry_token
                 check_result = self._check_channel(channel_id, **_check_kwargs)

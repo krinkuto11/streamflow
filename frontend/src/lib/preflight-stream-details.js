@@ -19,6 +19,12 @@ export const preflightScore = (value) => (
   typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : 'Not scored'
 )
 
+export const preflightMeasurementTime = (value) => {
+  if (!value) return null
+  const date = new Date(value)
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : null
+}
+
 export const preflightAction = (stream) => {
   if (stream.action === 'order_not_applied') return 'Order not applied'
   if (stream.action === 'not_retained') return 'Not retained in channel'

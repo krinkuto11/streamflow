@@ -9,7 +9,7 @@ from flask import Flask
 
 from apps.api.teamarr_preflight_handlers import get_teamarr_preflight_inspection_response
 from apps.stream.preflight_inspection import build_inspection, public_inspection, MAX_INSPECTION_BYTES
-from apps.stream.teamarr_preflight_service import TeamarrPreflightService, MAX_EVENTS
+from apps.stream.teamarr_preflight_service import TeamarrPreflightService, MAX_EVENTS, normalize_config
 
 
 def snapshot(**overrides):
@@ -134,3 +134,22 @@ def test_result_ids_do_not_collide_and_expired_details_return_404():
         response, status = get_teamarr_preflight_inspection_response(
             inspection_id=ids[0], get_service=lambda: service)
     assert status == 404 and response.get_json()['code'] == 'inspection_not_found'
+
+
+@pytest.mark.parametrize('manual', [False, True])
+def test_automatic_reuse_context_is_forwarded_but_manual_force_is_full(manual):
+    from datetime import datetime, timezone
+    service, checker = service_harness({'success': True})
+    config = normalize_config({'skip_known_good_streams': True})
+    service.get_config = lambda **kwargs: config
+    event = {'identity': 'event:1', 'dispatcharr_channel_id': 77,
+             'event_date': datetime.fromtimestamp(service.clock() + 1200, timezone.utc).isoformat(),
+             'trigger_bucket': 'manual' if manual else '20m'}
+    service._run_check('attempt', event, config)
+    kwargs = checker.check_single_channel.call_args.kwargs
+    assert kwargs['force_check'] is True
+    if manual:
+        assert 'preflight_context' not in kwargs
+    else:
+        assert kwargs['preflight_context']['identity'] == event['identity']
+        assert kwargs['preflight_context']['channel_id'] == 77

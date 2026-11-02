@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Reuse successful Teamarr preflight measurements ([#528](https://github.com/krinkuto11/streamflow/issues/528)).** Optional **Teamarr Preflight -> Configuration -> Skip Known Good Streams**, off by default. Later automatic checkpoints of the same event reuse complete successful measurements while retrying failed, below-threshold, incomplete, new, changed or stale sources. Event/source/profile validation, original check times, ranking and manual full rechecks are preserved; an all-good checkpoint uses no media-probe slots. Suggested by [@Muppetteer](https://github.com/Muppetteer).
+
 ## [2.8.0] - 2026-10-22
 
 This release promotes the complete tested `dev` branch to `main`, including the

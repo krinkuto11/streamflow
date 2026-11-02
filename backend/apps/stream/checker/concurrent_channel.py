@@ -36,6 +36,7 @@ class CheckerConcurrentChannelMixin:
         batch_changelog_generation: Optional[int] = None,
         queue_entry_token: Optional[int] = None,
         expected_progress_generation: Optional[int] = None,
+        preflight_context: Optional[Dict] = None,
     ):
         """Check and reorder streams for a specific channel using parallel thread pool.
 
@@ -329,13 +330,28 @@ class CheckerConcurrentChannelMixin:
 
             logger.info(f"Found {len(streams)} streams for channel {channel_name}")
 
-            # Check if channel has active viewers or if its playlist has reached max concurrent streams
+            reuse_check = None
+            if run_mode == 'teamarr_preflight' and preflight_context is not None:
+                from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
+                reuse_accounts = udi.get_m3u_accounts()
+                reuse_check = get_teamarr_preflight_service().prepare_stream_reuse(
+                    preflight_context, channel=channel_data, streams=streams,
+                    profile=profile, analysis_config=self.config.get('stream_analysis', {}),
+                    accounts=reuse_accounts,
+                    is_good=lambda source: not self._is_stream_dead(source, channel_id, _threshold_config)[0],
+                    is_dead=lambda stream: self._preflight_source_is_dead(stream, udi, reuse_accounts),
+                )
+                if reuse_check is not None:
+                    target_stream_ids = reuse_check.target_ids
+            probe_candidates = (streams if reuse_check is None else
+                                [item for item in streams if item['id'] in reuse_check.target_ids])
+            # Capacity guards apply only to sources that will actually be opened.
             limit_check_result = self._check_channel_limits(
                 channel_id,
                 channel_name,
-                streams,
+                probe_candidates,
                 provider_limit_override=provider_limit_override,
-            )
+            ) if probe_candidates else None
             if limit_check_result is not None:
                 self._complete_channel_check(
                     channel_id,
@@ -405,7 +421,9 @@ class CheckerConcurrentChannelMixin:
                 return build_inspection(
                     streams=streams, analyzed=analyzed,
                     skipped=active_viewer_skipped_streams + [
-                        {'id': item['id'], 'reason': 'cached_measurement'}
+                        {'id': item['id'], 'reason': (
+                            'known_good_reused' if reuse_check is not None and item['id'] in reuse_check.reused
+                            else 'cached_measurement')}
                         for item in streams_already_checked
                     ],
                     checked_ids={item['id'] for item in streams_to_check},
@@ -554,6 +572,10 @@ class CheckerConcurrentChannelMixin:
             # be added to dead_stream_ids. Unchecked streams retain their tracker
             # state unchanged until a future run evaluates them directly.
             checked_stream_id_set = {s['id'] for s in streams_to_check}
+            if reuse_check is not None and force_check and (
+                force_check_override is None or owned_force_generation is not None
+            ):
+                self.update_tracker.clear_force_check(channel_id, expected_generation=owned_force_generation)
 
             # Get configuration for analysis
             analysis_params = self.config.get('stream_analysis', {})
@@ -573,7 +595,7 @@ class CheckerConcurrentChannelMixin:
             # inventory. Empty or malformed snapshots must stop this channel
             # before the smart scheduler can invoke an analyzer.
             account_limiter = get_account_limiter()
-            if not self._initialize_provider_probe_account_inventory(
+            if streams_to_check and not self._initialize_provider_probe_account_inventory(
                 udi=udi,
                 limiter=account_limiter,
                 initialize_account_limits=initialize_account_limits,
@@ -584,7 +606,7 @@ class CheckerConcurrentChannelMixin:
                 )
 
             # Initialize smart scheduler with account-aware limiting
-            smart_scheduler = get_smart_scheduler(global_limit=global_limit)
+            smart_scheduler = get_smart_scheduler(global_limit=global_limit) if streams_to_check else None
 
             # Prepare for concurrent execution
             analyzed_streams = []
@@ -914,82 +936,85 @@ class CheckerConcurrentChannelMixin:
                     analyzed_streams.append(analyzed)
 
 
-                # --- MERGE CACHED STREAMS FOR CORRECT SORTING AND LIMITING ---
-                # Retrieve "cached" streams that weren't analyzed (because they are within immunity period)
-                # We need to include them in the sorting and limiting process to ensure we keep the absolute best streams
-                if streams_already_checked:
-                    cached_analyzed_streams = []
-                    logger.info(f"Re-integrating {len(streams_already_checked)} cached streams for global sorting/limiting")
+            # --- MERGE CACHED STREAMS FOR CORRECT SORTING AND LIMITING ---
+            # Retrieve "cached" streams that weren't analyzed (because they are within immunity period)
+            # We need to include them in the sorting and limiting process to ensure we keep the absolute best streams
+            if streams_already_checked:
+                cached_analyzed_streams = []
+                logger.info(f"Re-integrating {len(streams_already_checked)} cached streams for global sorting/limiting")
 
-                    for stream in streams_already_checked:
-                        stream_id = stream['id']
-                        # Reconstruct a minimal 'analyzed' object from stored stats
-                        # This allows standard scoring and sorting logic to work
-                        stream_stats = stream.get('stream_stats')
-                        if stream_stats is None:
+                for stream in streams_already_checked:
+                    stream_id = stream['id']
+                    # Reconstruct a minimal 'analyzed' object from stored stats
+                    # This allows standard scoring and sorting logic to work
+                    stream_stats = stream.get('stream_stats')
+                    if stream_stats is None:
+                        stream_stats = {}
+                    elif isinstance(stream_stats, str):
+                        try:
+                            stream_stats = json.loads(stream_stats)
+                        except:
                             stream_stats = {}
-                        elif isinstance(stream_stats, str):
-                            try:
-                                stream_stats = json.loads(stream_stats)
-                            except:
-                                stream_stats = {}
 
-                        extracted_cached_stats = extract_stream_stats(stream)
-                        current_cached_bitrate = extracted_cached_stats.get(
-                            'bitrate_kbps'
-                        )
+                    extracted_cached_stats = extract_stream_stats(stream)
+                    current_cached_bitrate = extracted_cached_stats.get(
+                        'bitrate_kbps'
+                    )
 
-                        # Map stored stats back to analysis keys. A bitrate kept
-                        # in Dispatcharr beside an incomplete marker is ranking
-                        # history only, never the current cached measurement.
-                        cached_analyzed = {
-                            'stream_id': stream_id,
-                            'stream_url': stream.get('url'),
-                            'stream_name': stream.get('name'),
-                            'bitrate_kbps': current_cached_bitrate,
-                            'scoring_bitrate_kbps': (
-                                self._previous_stream_bitrate(stream)
-                                if current_cached_bitrate is None
-                                else None
-                            ),
-                            'resolution': stream_stats.get('resolution', 'N/A'),
-                            'fps': stream_stats.get('source_fps', 0),
-                            'video_codec': stream_stats.get('video_codec', 'N/A'),
-                            'audio_codec': stream_stats.get('audio_codec', 'N/A'),
-                            'hdr_format': stream_stats.get('hdr_format'),
-                            'blank_probe_ran': stream_stats.get('blank_probe_ran', False),
-                            'blank_detected': stream_stats.get('blank_detected', False),
-                            'blank_duration_secs': stream_stats.get('blank_duration_secs'),
-                            'blank_ratio': stream_stats.get('blank_ratio'),
-                            'freeze_probe_ran': stream_stats.get('freeze_probe_ran', False),
-                            'freeze_detected': stream_stats.get('freeze_detected', False),
-                            'freeze_duration_secs': stream_stats.get('freeze_duration_secs'),
-                            'freeze_ratio': stream_stats.get('freeze_ratio'),
-                            'status': 'cached',
-                            'channel_id': channel_id,
-                            'channel_name': channel_name,
-                            'score': 0.0 # Will be calculated below
-                        }
-                        for field in (
-                            'quality_reason',
-                            'quality_reason_detail',
-                            'quality_reason_context',
-                        ):
-                            if field in stream_stats:
-                                cached_analyzed[field] = stream_stats.get(field)
-                        self._copy_bitrate_recheck_report_fields(
-                            cached_analyzed,
-                            stream_stats,
-                        )
+                    # Map stored stats back to analysis keys. A bitrate kept
+                    # in Dispatcharr beside an incomplete marker is ranking
+                    # history only, never the current cached measurement.
+                    cached_analyzed = {
+                        'stream_id': stream_id,
+                        'stream_url': stream.get('url'),
+                        'stream_name': stream.get('name'),
+                        'bitrate_kbps': current_cached_bitrate,
+                        'scoring_bitrate_kbps': (
+                            self._previous_stream_bitrate(stream)
+                            if current_cached_bitrate is None
+                            else None
+                        ),
+                        'resolution': stream_stats.get('resolution', 'N/A'),
+                        'fps': stream_stats.get('source_fps', 0),
+                        'video_codec': stream_stats.get('video_codec', 'N/A'),
+                        'audio_codec': stream_stats.get('audio_codec', 'N/A'),
+                        'hdr_format': stream_stats.get('hdr_format'),
+                        'blank_probe_ran': stream_stats.get('blank_probe_ran', False),
+                        'blank_detected': stream_stats.get('blank_detected', False),
+                        'blank_duration_secs': stream_stats.get('blank_duration_secs'),
+                        'blank_ratio': stream_stats.get('blank_ratio'),
+                        'freeze_probe_ran': stream_stats.get('freeze_probe_ran', False),
+                        'freeze_detected': stream_stats.get('freeze_detected', False),
+                        'freeze_duration_secs': stream_stats.get('freeze_duration_secs'),
+                        'freeze_ratio': stream_stats.get('freeze_ratio'),
+                        'status': 'cached',
+                        'channel_id': channel_id,
+                        'channel_name': channel_name,
+                        'score': 0.0 # Will be calculated below
+                    }
+                    for field in (
+                        'quality_reason',
+                        'quality_reason_detail',
+                        'quality_reason_context',
+                    ):
+                        if field in stream_stats:
+                            cached_analyzed[field] = stream_stats.get(field)
+                    self._copy_bitrate_recheck_report_fields(
+                        cached_analyzed,
+                        stream_stats,
+                    )
 
-                        # Calculate score using CURRENT profile weights
-                        score = self._calculate_stream_score(cached_analyzed, priority_m3u_ids, priority_mode, scoring_weights)
-                        cached_analyzed['score'] = score
-                        cached_analyzed_streams.append(cached_analyzed)
+                    if reuse_check is not None and stream_id in reuse_check.reused:
+                        cached_analyzed['measurement_checked_at'] = reuse_check.checked_at(stream_id)
 
-                    # Merge cached streams with newly analyzed streams
-                    analyzed_streams.extend(cached_analyzed_streams)
-                    logger.info(f"Merged {len(cached_analyzed_streams)} cached streams with {len(results)} new results. Total candidates: {len(analyzed_streams)}")
+                    # Calculate score using CURRENT profile weights
+                    score = self._calculate_stream_score(cached_analyzed, priority_m3u_ids, priority_mode, scoring_weights)
+                    cached_analyzed['score'] = score
+                    cached_analyzed_streams.append(cached_analyzed)
+
+                # Merge cached streams with newly analyzed streams
+                analyzed_streams.extend(cached_analyzed_streams)
+                logger.info(f"Merged {len(cached_analyzed_streams)} cached streams with {len(results)} new results. Total candidates: {len(analyzed_streams)}")
 
                 logger.info(f"Completed smart parallel analysis of {len(results)} streams with account-aware limits")
 
@@ -1080,6 +1105,7 @@ class CheckerConcurrentChannelMixin:
 
             analyzed_streams.sort(key=lambda x: x['sort_key'])
 
+            reuse_candidates = list(analyzed_streams) if reuse_check is not None else []
             # Retain all evaluated candidates for preflight diagnostics before filtering.
             inspection_candidates = list(analyzed_streams) if run_mode == 'teamarr_preflight' else []
             if run_mode == 'teamarr_preflight':
@@ -1425,6 +1451,14 @@ class CheckerConcurrentChannelMixin:
                 ),
                 queue_entry_token=queue_entry_token,
             )
+
+            if reuse_check is not None:
+                authorized, _ = self._run_channel_side_effect_if_authorized(
+                    channel_id, queue_entry_token,
+                    lambda: reuse_check.finish(reuse_candidates, checked_stream_id_set, dead_stream_ids),
+                )
+                if not authorized:
+                    return self._abort_channel_check(channel_id, channel_name, queue_entry_token=queue_entry_token)
 
             blank_streams_count = self._count_checked_stream_status(
                 {'checked_streams': stream_stats},

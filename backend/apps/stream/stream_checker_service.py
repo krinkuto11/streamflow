@@ -655,6 +655,7 @@ class StreamCheckerService(CheckerOperationsMixin):
         batch_changelog_generation: Optional[int] = None,
         queue_entry_token: Optional[int] = None,
         expected_progress_generation: Optional[int] = None,
+        preflight_context: Optional[Dict] = None,
     ):
         """Check and reorder streams for a specific channel.
 
@@ -727,6 +728,7 @@ class StreamCheckerService(CheckerOperationsMixin):
                 batch_changelog_generation=batch_changelog_generation,
                 queue_entry_token=queue_entry_token,
                 expected_progress_generation=progress_generation,
+                **({'preflight_context': preflight_context} if preflight_context is not None else {}),
             )
         else:
             # Keep the user-visible sequential mode while retaining the same
@@ -746,6 +748,7 @@ class StreamCheckerService(CheckerOperationsMixin):
                 batch_changelog_generation=batch_changelog_generation,
                 queue_entry_token=queue_entry_token,
                 expected_progress_generation=progress_generation,
+                **({'preflight_context': preflight_context} if preflight_context is not None else {}),
             )
 
 

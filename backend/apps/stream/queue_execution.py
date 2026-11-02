@@ -26,6 +26,8 @@ class StreamCheckQueueExecutionMixin:
         }
         if queue_metadata.get('source') == 'teamarr_preflight':
             single_check_kwargs['run_mode'] = 'teamarr_preflight'
+            if isinstance(queue_metadata.get('preflight_context'), dict):
+                single_check_kwargs['preflight_context'] = queue_metadata['preflight_context']
         if queue_metadata.get('provider_limit_override'):
             single_check_kwargs['provider_limit_override'] = True
 
