@@ -243,7 +243,7 @@ export const operatorHelpDetailTopics = [
           alt: 'Live dark mode crop of the Provider Stream Cap setting and its ranked backfill explanation.',
           caption: 'Provider Stream Cap is in the profile editor under Stream Checking. Remaining channel slots can exceed this soft cap.',
           width: 415,
-          height: 124,
+          height: 125,
         },
       },
       {
@@ -572,7 +572,7 @@ export const operatorHelpDetailTopics = [
           alt: 'Dark mode crop of the Skip Known Good Streams switch in the live Teamarr Preflight Configuration card.',
           caption: 'Teamarr Preflight -> Configuration -> Skip Known Good Streams. Off by default; manual Force Check still probes every source.',
           width: 666,
-          height: 125,
+          height: 124,
         },
       },
       {
