@@ -182,3 +182,15 @@ def test_bounded_persistence_keeps_sibling_events(evidence, monkeypatch):
         evidence["prepare"]().finish([measured()], {1}, set())
     assert len(evidence["db"].values[STATE_KEY]["entries"]) == 2
     assert evidence["prepare"]().target_ids == []
+
+
+def test_newer_failure_on_transformed_provider_route_prevents_reuse(evidence):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from apps.stream.stream_checker_service import StreamCheckerService
+    checker = StreamCheckerService.__new__(StreamCheckerService)
+    checker.dead_streams_tracker = SimpleNamespace(is_dead=lambda url: url == 'https://transformed/failed')
+    udi = SimpleNamespace(apply_profile_url_transformation=lambda stream, profile: 'https://transformed/failed')
+    seed(evidence)
+    run = evidence['prepare'](is_dead=lambda stream: checker._preflight_source_is_dead(stream, udi, evidence['accounts']))
+    assert run.target_ids == [1]

@@ -333,12 +333,13 @@ class CheckerConcurrentChannelMixin:
             reuse_check = None
             if run_mode == 'teamarr_preflight' and preflight_context is not None:
                 from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
+                reuse_accounts = udi.get_m3u_accounts()
                 reuse_check = get_teamarr_preflight_service().prepare_stream_reuse(
                     preflight_context, channel=channel_data, streams=streams,
                     profile=profile, analysis_config=self.config.get('stream_analysis', {}),
-                    accounts=udi.get_m3u_accounts(),
+                    accounts=reuse_accounts,
                     is_good=lambda source: not self._is_stream_dead(source, channel_id, _threshold_config)[0],
-                    is_dead=self.dead_streams_tracker.is_dead,
+                    is_dead=lambda stream: self._preflight_source_is_dead(stream, udi, reuse_accounts),
                 )
                 if reuse_check is not None:
                     target_stream_ids = reuse_check.target_ids

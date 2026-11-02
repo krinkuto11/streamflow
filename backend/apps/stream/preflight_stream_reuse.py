@@ -182,7 +182,7 @@ class PreflightStreamReuse:
             for stream in streams:
                 sid = str(stream["id"])
                 entry = entries.get(event_key + ":" + sid, {})
-                if not entry or not sources[sid] or is_dead(stream.get("url", "")):
+                if not entry or not sources[sid] or is_dead(stream):
                     continue
                 if (entry.get("source") == sources[sid] and entry.get("policy") == policy_key
                         and 0 <= now - float(entry["measured_at"]) < context["max_age_seconds"]

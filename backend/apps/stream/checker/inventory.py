@@ -7,6 +7,19 @@ logger = logging.getLogger("apps.stream.stream_checker_service")
 
 
 class CheckerInventoryMixin:
+    def _preflight_source_is_dead(self, stream, udi, accounts):
+        """A newer failure on any active credential route invalidates reuse."""
+        urls = {stream.get('url')}
+        account_id = self._get_stream_m3u_account_id(stream)
+        for account in accounts:
+            if str(account.get('id')) != str(account_id):
+                continue
+            for profile in account.get('profiles', []):
+                if profile.get('is_active', True):
+                    urls.add(udi.apply_profile_url_transformation(stream, profile))
+        return any(not isinstance(url, str) or not url or self.dead_streams_tracker.is_dead(url)
+                   for url in urls)
+
     @staticmethod
     def _coerce_stream_id_list(raw_stream_ids: Any) -> List[int]:
         """Return stream IDs as ints, accepting Dispatcharr int or object lists."""
