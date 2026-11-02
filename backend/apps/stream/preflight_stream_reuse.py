@@ -42,6 +42,9 @@ def measurement_fingerprint(source):
     for field in ("fps", "bitrate_kbps"):
         value = metrics.get(field)
         metrics[field] = float(value) if value is not None else None
+    if metrics["bitrate_kbps"] is not None:
+        # StreamStatsWriter persists ffmpeg_output_bitrate as integer kbps.
+        metrics["bitrate_kbps"] = int(metrics["bitrate_kbps"])
     facts = stats_blob(source)
     return fingerprint({
         "metrics": {key: metrics.get(key) for key in (

@@ -193,3 +193,12 @@ def test_newer_failure_on_transformed_provider_route_prevents_reuse(evidence):
     seed(evidence)
     run = evidence['prepare'](is_dead=lambda stream: checker._preflight_source_is_dead(stream, udi, evidence['accounts']))
     assert run.target_ids == [1]
+
+
+def test_analyzer_fractional_bitrate_matches_the_acknowledged_integer_stats(evidence):
+    evidence['prepare']().finish([measured(bitrate_kbps=4000.75)], {1}, set())
+    stats = evidence['streams'][0]['stream_stats']
+    stats.pop('bitrate_kbps')
+    stats['ffmpeg_output_bitrate'] = 4000
+    stats['source_fps'] = stats.pop('fps')
+    assert evidence['prepare']().target_ids == []
