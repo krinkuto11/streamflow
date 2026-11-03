@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Incomplete EPG responses use fixed retry guidance instead of exception text,
+  preserving HTTP 503 and `epg_snapshot_incomplete` without exposing diagnostics.
+
 ### Fixed
 
 - RTSP and RTSPS sources, including cable tuners, can pass provider profile URL

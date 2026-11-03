@@ -26,3 +26,9 @@ and literal substitution parity, replacement backreferences and amplification,
 preview/apply consistency, provider scoping and priority preservation, and
 secret-bearing failure responses. CodeQL must be evaluated through its actual
 results as well as its workflow status; a successful workflow can report alerts.
+
+Incomplete EPG snapshots in channel-program lookup and Auto-Create rule tests
+return fixed retry guidance with HTTP 503 and `epg_snapshot_incomplete`. The
+response is independent of exception text, including diagnostics added by future
+service changes. Missing-TVG-ID guidance and successful responses retain their
+existing contracts. This is automatic API behavior, not a user setting.
