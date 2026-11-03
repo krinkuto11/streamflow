@@ -58,7 +58,7 @@ from typing import Callable, Dict, Optional, Tuple, Any, List
 from PIL import Image
 from apps.core.logging_config import setup_logging
 from apps.core.log_sanitizer import audit_ref as _audit_ref, scrub_urls, stream_ref, url_ref
-from apps.core.stream_protocols import has_supported_stream_protocol
+from apps.core.stream_protocols import effective_stream_startup_buffer, has_supported_stream_protocol
 
 logger = setup_logging(__name__)
 
@@ -1338,6 +1338,7 @@ def get_stream_info(url: str, timeout: int = 30, user_agent: str = 'VLC/3.0.14')
 
     Get stream information using ffprobe to extract codec, resolution, and FPS.
     """
+    timeout = effective_stream_startup_buffer(url, timeout)
     logger.debug(f"Running ffprobe for URL: {url_ref(url)}")
     command = [
         'ffprobe',
@@ -1431,6 +1432,7 @@ def _ffprobe_media_fallback(
     This does not forgive truly offline streams: the fallback is accepted only
     when ffprobe sees a video stream with non-zero dimensions.
     """
+    timeout = effective_stream_startup_buffer(url, timeout)
     command = [
         'ffprobe',
         '-user_agent', user_agent,
@@ -1630,6 +1632,7 @@ def _run_visual_detection_probe(
     preempt_check: Optional[Callable[[], bool]],
 ) -> Dict[str, Any]:
     """Run expensive visual filters separately from the cheap bitrate probe."""
+    stream_startup_buffer = effective_stream_startup_buffer(url, stream_startup_buffer)
     visual_duration = _visual_probe_duration(
         duration=duration,
         blank_check_enabled=blank_check_enabled,
@@ -1875,6 +1878,7 @@ def get_stream_info_and_bitrate(
             'bitrate_source': None,
         }
 
+    stream_startup_buffer = effective_stream_startup_buffer(url, stream_startup_buffer)
     logger.debug(f"Analyzing stream with ffmpeg for {duration}s: {url_ref(url)}")
 
     extra_args = _get_ffmpeg_extra_args()
@@ -2298,6 +2302,7 @@ def get_stream_bitrate(
         status: "OK", "Timeout", or "Error"
         elapsed_time: Time taken for the operation
     """
+    stream_startup_buffer = effective_stream_startup_buffer(url, stream_startup_buffer)
     logger.debug(f"Analyzing bitrate for {duration}s...")
     extra_args = _get_ffmpeg_extra_args()
     hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
@@ -2866,6 +2871,7 @@ def analyze_stream(
         - hdr_format, pixel_format, audio_sample_rate, audio_channels
         - channel_layout, audio_bitrate, status
     """
+    stream_startup_buffer = effective_stream_startup_buffer(stream_url, stream_startup_buffer)
     stream_audit_ref = stream_ref(stream_id, stream_url)
 
     if logger.isEnabledFor(logging.DEBUG):
