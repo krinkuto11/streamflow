@@ -400,6 +400,91 @@ class TestGetStreamBitrate(unittest.TestCase):
 class TestGetStreamInfoAndBitrate(unittest.TestCase):
     """Test combined ffmpeg analysis with ffprobe safety fallbacks."""
 
+    def test_rtsp_sources_reach_ffmpeg_and_keep_measured_dimensions(self):
+        output = (
+            'Input #0, rtsp, from tuner:\n'
+            '  Stream #0:0: Video: h264, yuv420p, 1920x1080, 25 fps\n'
+            'Output #0, mpegts, to pipe:1:\n'
+            'frame= 25 fps=25 size=500kB time=00:00:01.00 '
+            'bitrate= 4123.0kbits/s speed=1.0x\n'
+        )
+        for scheme in ('rtsp', 'rtsps'):
+            with self.subTest(scheme=scheme):
+                url = f'{scheme}://tuner.test:554/?freq=450&sid=101'
+                with patch.object(
+                    stream_check_utils, '_run_ffmpeg_with_optional_fallback',
+                    return_value=subprocess.CompletedProcess([], 0, stderr=output),
+                ) as run:
+                    result = get_stream_info_and_bitrate(
+                        url, duration=1, timeout=2, stream_startup_buffer=0,
+                    )
+                run.assert_called_once()
+                command = run.call_args.args[0]
+                self.assertEqual(command[command.index('-i') + 1], url)
+                self.assertEqual(result['status'], 'OK')
+                self.assertEqual(result['resolution'], '1920x1080')
+                self.assertEqual(result['bitrate_kbps'], 4123.0)
+
+    def test_non_stream_protocols_never_launch_ffmpeg(self):
+        for url in ('file:///etc/passwd', 'data:text/plain,hello', 'ftp://tuner.test/101'):
+            with self.subTest(url=url):
+                with patch.object(stream_check_utils, '_run_ffmpeg_with_optional_fallback') as run:
+                    result = get_stream_info_and_bitrate(url, duration=1)
+                run.assert_not_called()
+                self.assertEqual(result['status'], 'Error')
+
+    def test_slow_rtsp_connection_keeps_the_full_media_window(self):
+        output = (
+            'Input #0, rtsp, from tuner:\n'
+            '  Stream #0:0: Video: h264, yuv420p, 1920x1080, 25 fps\n'
+            'Output #0, mpegts, to pipe:1:\n'
+            'frame= 750 fps=25 size=15000kB time=00:00:30.00 '
+            'bitrate= 4123.0kbits/s speed=1.0x\n'
+        )
+
+        def delayed_probe(command, **kwargs):
+            # Tuner setup plus the full 30-second media window exceeds the
+            # normal HTTP budget. Only the RTSP startup allowance covers it.
+            if kwargs['timeout'] < 115:
+                raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+            return subprocess.CompletedProcess(command, 0, stderr=output)
+
+        with patch.object(
+            stream_check_utils, '_run_ffmpeg_with_optional_fallback',
+            side_effect=delayed_probe,
+        ) as run, patch.object(stream_check_utils.time, 'monotonic', side_effect=[0, 115]):
+            result = get_stream_info_and_bitrate(
+                'rtsp://tuner.test/live', duration=30, timeout=30,
+                stream_startup_buffer=10,
+            )
+
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index('-t') + 1], '30')
+        self.assertEqual(result['status'], 'OK')
+        self.assertEqual(result['resolution'], '1920x1080')
+        self.assertEqual(result['startup_buffer_seconds'], 60)
+
+    def test_rtsp_startup_preserves_larger_settings_and_http_timing(self):
+        output = (
+            'Input #0, mpegts, from tuner:\n'
+            '  Stream #0:0: Video: h264, yuv420p, 1280x720, 25 fps\n'
+            'Output #0, mpegts, to pipe:1:\n'
+            'frame= 750 fps=25 size=15000kB time=00:00:30.00 '
+            'bitrate= 4123.0kbits/s speed=1.0x\n'
+        )
+        for url, configured in (('rtsp://tuner.test/live', 90), ('http://provider.test/live', 10)):
+            with self.subTest(url=url), patch.object(
+                stream_check_utils, '_run_ffmpeg_with_optional_fallback',
+                return_value=subprocess.CompletedProcess([], 0, stderr=output),
+            ) as run:
+                result = get_stream_info_and_bitrate(url, stream_startup_buffer=configured)
+                self.assertEqual(result['startup_buffer_seconds'], configured)
+                self.assertEqual(
+                    run.call_args.kwargs['timeout'],
+                    stream_check_utils._stream_analysis_timeout(30, 30, configured),
+                )
+
     def test_preemptible_probe_drains_large_stderr_and_keeps_bitrate(self):
         """A warning flood must not trigger ffprobe or erase later FFmpeg stats."""
         script = (

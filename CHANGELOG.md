@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- RTSP and RTSPS sources, including cable tuners, can pass provider profile URL
+  resolution and FFmpeg quality probing. Default identity rewrites preserve the
+  original URL; alternate-profile isolation and capacity limits remain enforced.
+  RTSP tuner setup receives at least 60 seconds of startup buffer without
+  shortening the media measurement window or changing HTTP probe timing.
+
 ## [2.9.0] - 2026-11-02
 
 This release promotes the tested development changes to stable. Changes are

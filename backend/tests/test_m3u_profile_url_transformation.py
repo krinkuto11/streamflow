@@ -161,6 +161,59 @@ class TestM3UProfileURLTransformation(unittest.TestCase):
         self.assertTrue(all(not eligible for eligible, _url, _reason in outcomes))
         self.assertTrue(all(url == '' for _eligible, url, _reason in outcomes))
 
+    def test_rtsp_default_identity_rewrite_remains_eligible(self):
+        """Standard cable profiles keep their RTSP route and query intact."""
+        from apps.udi.manager import UDIManager
+
+        manager = object.__new__(UDIManager)
+        profile = {
+            'id': 10, 'is_default': True,
+            'search_pattern': r'^(.*)$', 'replace_pattern': '$1',
+        }
+        for scheme in ('rtsp', 'rtsps'):
+            with self.subTest(scheme=scheme):
+                stream = {'id': 101, 'url': f'{scheme}://tuner.test:554/?freq=450&sid=101'}
+                self.assertEqual(
+                    manager.resolve_profile_stream_url(stream, profile),
+                    (True, stream['url'], 'default_profile_url'),
+                )
+
+    def test_rtsp_alternate_profile_requires_its_own_changed_route(self):
+        """RTSP support preserves alternate-profile credential isolation."""
+        from apps.udi.manager import UDIManager
+
+        manager = object.__new__(UDIManager)
+        stream = {'id': 101, 'url': 'rtsp://main:secret@tuner.test/101'}
+        profile = {
+            'id': 11, 'is_default': False,
+            'search_pattern': r'//main:secret@',
+            'replace_pattern': '//alternate:token@',
+        }
+        self.assertEqual(
+            manager.resolve_profile_stream_url(stream, profile),
+            (True, 'rtsp://alternate:token@tuner.test/101', 'profile_url_transformed'),
+        )
+        profile.update(search_pattern=r'^(.*)$', replace_pattern='$1')
+        self.assertEqual(
+            manager.resolve_profile_stream_url(stream, profile),
+            (False, '', 'profile_url_unchanged'),
+        )
+
+    def test_profile_rewrites_still_reject_non_stream_protocols(self):
+        from apps.udi.manager import UDIManager
+
+        manager = object.__new__(UDIManager)
+        for url in ('file:///etc/passwd', 'data:text/plain,hello', 'ftp://tuner.test/101'):
+            with self.subTest(url=url):
+                self.assertEqual(
+                    manager.resolve_profile_stream_url(
+                        {'id': 101, 'url': url},
+                        {'id': 10, 'is_default': True,
+                         'search_pattern': r'^(.*)$', 'replace_pattern': '$1'},
+                    ),
+                    (False, '', 'invalid_profile_url_protocol'),
+                )
+
     def test_non_boolean_default_flag_cannot_select_raw_provider_url(self):
         """String-like booleans must not become implicit default credentials."""
         from apps.udi.manager import UDIManager

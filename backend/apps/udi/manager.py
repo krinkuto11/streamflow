@@ -48,6 +48,7 @@ from apps.core.request_coalescing import SingleFlight
 from apps.udi.cache import UDICache
 from apps.udi.storage import UDIStorage
 from apps.core.auth import _get_auth_headers
+from apps.core.stream_protocols import has_supported_stream_protocol
 
 from apps.core.logging_config import setup_logging
 
@@ -3063,7 +3064,7 @@ class UDIManager(ChannelMetadataMixin):
             )
             return (False, '', 'profile_url_transformation_failed')
 
-        if not transformed_url.startswith(('http://', 'https://', 'rtmp://', 'rtmps://')):
+        if not has_supported_stream_protocol(transformed_url):
             logger.error(
                 "Profile %s URL transformation produced an invalid protocol",
                 profile.get('id'),

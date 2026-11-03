@@ -8,6 +8,17 @@ Stream checking is the third step of the automation pipeline. It uses ffmpeg to 
 
 ## Quality checking
 
+Quality probes accept HTTP, HTTPS, RTMP, RTMPS, RTSP and RTSPS sources, including
+RTSP cable tuners. Provider profile URL rewrites use the same protocol rules.
+The default identity rewrite (`^(.*)$` to `$1`) preserves the configured source
+URL and query parameters. Alternate profiles still require their own changed
+route, and provider/profile capacity limits apply to these probes as usual.
+This is automatic backend behavior; no additional StreamFlow setting is needed.
+RTSP probes allow at least 60 seconds of startup buffer in addition to the
+configured timeout, media measurement window and completion headroom. Larger
+configured startup buffers are preserved. This minimum is backend-only and also
+applies to visual/bitrate retries and metadata fallback; HTTP timing is unchanged.
+
 Each stream is analyzed by spawning a short ffmpeg probe session. Extracted metrics:
 
 - Bitrate (kbps)
