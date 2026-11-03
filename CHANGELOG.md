@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Incomplete EPG responses use fixed retry guidance instead of exception text,
+  preserving HTTP 503 and `epg_snapshot_incomplete` without exposing diagnostics.
+
 ## [2.9.0] - 2026-11-02
 
 This release promotes the tested development changes to stable. Changes are
