@@ -21,6 +21,11 @@ from apps.automation.epg_snapshot import EpgSnapshotIncompleteError
 
 logger = logging.getLogger(__name__)
 
+_EPG_SNAPSHOT_INCOMPLETE_MESSAGE = (
+    "The EPG snapshot is incomplete. Auto-Create did not use the partial guide. "
+    "Retry the EPG refresh and check its snapshot status."
+)
+
 
 def get_scheduling_config_response(*, get_scheduling_service: Callable[[], Any]):
     """Handle retrieval of scheduling configuration."""
@@ -74,8 +79,10 @@ def get_channel_programs_response(*, channel_id: int, get_scheduling_service: Ca
         service = get_scheduling_service()
         programs = service.get_programs_by_channel(channel_id)
         return jsonify(programs)
-    except EpgSnapshotIncompleteError as exc:
-        return error_response(str(exc), status_code=503, code="epg_snapshot_incomplete")
+    except EpgSnapshotIncompleteError:
+        return error_response(
+            _EPG_SNAPSHOT_INCOMPLETE_MESSAGE, status_code=503, code="epg_snapshot_incomplete",
+        )
     except NoTvgIdError as exc:
         # SCH-002: surface missing TVG-ID as a structured response
         return jsonify({
@@ -260,8 +267,10 @@ def test_auto_create_rule_response(*, payload: Any, get_scheduling_service: Call
         )
         return jsonify(result)
 
-    except EpgSnapshotIncompleteError as exc:
-        return error_response(str(exc), status_code=503, code="epg_snapshot_incomplete")
+    except EpgSnapshotIncompleteError:
+        return error_response(
+            _EPG_SNAPSHOT_INCOMPLETE_MESSAGE, status_code=503, code="epg_snapshot_incomplete",
+        )
     except NoTvgIdError as exc:
         # SCH-002: channel has no TVG-ID — return structured 200 so the frontend
         # shows a specific actionable message instead of generic "No Matches".
