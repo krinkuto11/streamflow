@@ -400,6 +400,39 @@ class TestGetStreamBitrate(unittest.TestCase):
 class TestGetStreamInfoAndBitrate(unittest.TestCase):
     """Test combined ffmpeg analysis with ffprobe safety fallbacks."""
 
+    def test_rtsp_sources_reach_ffmpeg_and_keep_measured_dimensions(self):
+        output = (
+            'Input #0, rtsp, from tuner:\n'
+            '  Stream #0:0: Video: h264, yuv420p, 1920x1080, 25 fps\n'
+            'Output #0, mpegts, to pipe:1:\n'
+            'frame= 25 fps=25 size=500kB time=00:00:01.00 '
+            'bitrate= 4123.0kbits/s speed=1.0x\n'
+        )
+        for scheme in ('rtsp', 'rtsps'):
+            with self.subTest(scheme=scheme):
+                url = f'{scheme}://tuner.test:554/?freq=450&sid=101'
+                with patch.object(
+                    stream_check_utils, '_run_ffmpeg_with_optional_fallback',
+                    return_value=subprocess.CompletedProcess([], 0, stderr=output),
+                ) as run:
+                    result = get_stream_info_and_bitrate(
+                        url, duration=1, timeout=2, stream_startup_buffer=0,
+                    )
+                run.assert_called_once()
+                command = run.call_args.args[0]
+                self.assertEqual(command[command.index('-i') + 1], url)
+                self.assertEqual(result['status'], 'OK')
+                self.assertEqual(result['resolution'], '1920x1080')
+                self.assertEqual(result['bitrate_kbps'], 4123.0)
+
+    def test_non_stream_protocols_never_launch_ffmpeg(self):
+        for url in ('file:///etc/passwd', 'data:text/plain,hello', 'ftp://tuner.test/101'):
+            with self.subTest(url=url):
+                with patch.object(stream_check_utils, '_run_ffmpeg_with_optional_fallback') as run:
+                    result = get_stream_info_and_bitrate(url, duration=1)
+                run.assert_not_called()
+                self.assertEqual(result['status'], 'Error')
+
     def test_preemptible_probe_drains_large_stderr_and_keeps_bitrate(self):
         """A warning flood must not trigger ffprobe or erase later FFmpeg stats."""
         script = (

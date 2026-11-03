@@ -58,6 +58,7 @@ from typing import Callable, Dict, Optional, Tuple, Any, List
 from PIL import Image
 from apps.core.logging_config import setup_logging
 from apps.core.log_sanitizer import audit_ref as _audit_ref, scrub_urls, stream_ref, url_ref
+from apps.core.stream_protocols import has_supported_stream_protocol
 
 logger = setup_logging(__name__)
 
@@ -1857,13 +1858,8 @@ def get_stream_info_and_bitrate(
             'bitrate_source': None,
         }
 
-    url_lower = url.lower()
-    if not (url_lower.startswith('http://') or url_lower.startswith('https://') or
-            url_lower.startswith('rtmp://') or url_lower.startswith('rtmps://')):
-        logger.error(
-            f"Invalid URL protocol: {url_ref(url)} "
-            "(must be http://, https://, rtmp://, or rtmps://)"
-        )
+    if not has_supported_stream_protocol(url):
+        logger.error("Unsupported stream URL protocol: %s", url_ref(url))
         return {
             'video_codec': 'N/A', 'audio_codec': 'N/A', 'resolution': '0x0',
             'fps': 0, 'bitrate_kbps': None, 'hdr_format': None,

@@ -8,6 +8,13 @@ Stream checking is the third step of the automation pipeline. It uses ffmpeg to 
 
 ## Quality checking
 
+Quality probes accept HTTP, HTTPS, RTMP, RTMPS, RTSP and RTSPS sources, including
+RTSP cable tuners. Provider profile URL rewrites use the same protocol rules.
+The default identity rewrite (`^(.*)$` to `$1`) preserves the configured source
+URL and query parameters. Alternate profiles still require their own changed
+route, and provider/profile capacity limits apply to these probes as usual.
+This is automatic backend behavior; no additional StreamFlow setting is needed.
+
 Each stream is analyzed by spawning a short ffmpeg probe session. Extracted metrics:
 
 - Bitrate (kbps)
