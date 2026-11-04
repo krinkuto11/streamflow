@@ -130,7 +130,7 @@ function entryMatchesSourceFilter(entry, sourceFilter) {
   return true
 }
 
-function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
+function ChannelItem({ item, groupType, groupIndex, itemIndex, summaryLabel }) {
   const [logoError, setLogoError] = useState(false)
   const channelLabel = item.channel_name
   const channelStats = groupType === 'check' && item.stats ?
@@ -155,8 +155,8 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
               onError={() => setLogoError(true)}
             />
           )}
-          <span className="text-sm font-medium">{channelLabel}</span>
-          {channelStats && (
+          <span className="text-sm font-medium">{summaryLabel || channelLabel}</span>
+          {!summaryLabel && channelStats && (
             <span className="text-xs text-muted-foreground ml-2">: {channelStats}</span>
           )}
         </div>
@@ -288,6 +288,9 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                 </TableBody>
               </Table>
             </div>
+          )}
+          {groupType === 'check' && streamDetails.length === 0 && (
+            <p className="text-sm text-muted-foreground">No stream results were recorded for this check.</p>
           )}
         </div>
       </AccordionContent>
@@ -711,7 +714,7 @@ function ChannelVisibilityChanges({ events }) {
   )
 }
 
-function ChangelogEntry({ entry, onExport, exportingScope }) {
+export function ChangelogEntry({ entry, onExport, exportingScope }) {
   const { timestamp, action, details, subentries } = entry
   const hasSubentries = subentries && subentries.length > 0
   const runContextBadges = getChangelogRunContextBadges(details)
@@ -719,6 +722,13 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
   const visibilityMetrics = getChangelogVisibilityMetrics(details)
   const visibilityEvents = getChangelogVisibilityEvents(details)
   const preflightSummary = getChangelogPreflightSummary(entry)
+  const singleChannelItems = action === 'single_channel_check'
+    ? (subentries || []).filter(group => group.group === 'check').flatMap(group => group.items || [])
+    : null
+  const singleChannelName = singleChannelItems && (
+    details.channel_name || singleChannelItems[0]?.channel_name
+    || (details.channel_id != null ? `Channel ${details.channel_id}` : 'Channel unavailable')
+  )
 
   return (
     <Card className={`min-w-0 max-w-full overflow-hidden shadow-md transition-shadow hover:shadow-lg dark:bg-card/40 ${action === 'automation_run' ? 'border-2 border-blue-500 dark:border-green-500' : 'border-muted/60'}`}>
@@ -773,6 +783,13 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
           </div>
         </div>
 
+        {singleChannelItems && (
+          <div className="min-w-0 space-y-1 pt-2">
+            <CardTitle className="wrap-break-word text-lg leading-snug">{singleChannelName}</CardTitle>
+            {details.program_name && <CardDescription className="wrap-break-word">{details.program_name}</CardDescription>}
+          </div>
+        )}
+
         {runContextBadges.length > 0 && (
           <div className="mt-3 flex min-w-0 flex-wrap gap-2 border-t pt-3">
             {runContextBadges.map(item => (
@@ -788,7 +805,7 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
           </div>
         )}
 
-        <ChangelogPreflightSummary summary={preflightSummary} />
+        <ChangelogPreflightSummary summary={preflightSummary} showIdentity={!singleChannelItems} />
 
         {staleWarnings.length > 0 && (
           <div className="mt-3 flex min-w-0 flex-wrap gap-2 border-t pt-3">
@@ -990,7 +1007,25 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
         </CardContent>
       )}
 
-      {hasSubentries && (
+      {singleChannelItems && (
+        <CardContent className="pt-0">
+          <Accordion type="multiple" className="w-full">
+            {singleChannelItems.map((item, itemIndex) => (
+              <ChannelItem
+                key={item.channel_id ?? itemIndex}
+                item={item}
+                groupType="check"
+                groupIndex={0}
+                itemIndex={itemIndex}
+                summaryLabel={`${preflightSummary ? 'Additional stream metrics' : 'Stream results'} (${item.stats?.stream_details?.length || 0})`}
+              />
+            ))}
+          </Accordion>
+          {singleChannelItems.length === 0 && <p className="text-sm text-muted-foreground">No stream results were recorded for this check.</p>}
+        </CardContent>
+      )}
+
+      {hasSubentries && !singleChannelItems && (
         <CardContent className="pt-0">
           <Accordion type="multiple" className="w-full">
             <AccordionItem value="main-reason">

@@ -32,11 +32,11 @@ export function ChangelogPreflightStreams({ rows }) {
   </Table>
 }
 
-export function ChangelogPreflightSummary({ summary }) {
+export function ChangelogPreflightSummary({ summary, showIdentity = true }) {
   if (!summary) return null
   return <div className="mt-3 min-w-0 space-y-2 border-t pt-3">
-    <p className="wrap-break-word text-base font-semibold">{summary.channelName}</p>
-    {summary.programName && <p className="wrap-break-word text-sm text-muted-foreground">{summary.programName}</p>}
+    {showIdentity && <p className="wrap-break-word text-base font-semibold">{summary.channelName}</p>}
+    {showIdentity && summary.programName && <p className="wrap-break-word text-sm text-muted-foreground">{summary.programName}</p>}
     {summary.recorded ? <div className="flex flex-wrap gap-2" aria-label="Preflight measurements">
       <Badge variant="outline">Freshly checked: {summary.checked}</Badge>
       <Badge variant="secondary">Known good reused: {summary.reused}</Badge>

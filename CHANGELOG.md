@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Single-channel changelog entries show the channel name in the card heading
+  and open their full stream measurements in one click. This also applies to
+  historical and manual checks; Teamarr Preflight keeps its reuse summary and
+  offers detailed scoring/probe metrics directly. Suggested by
+  [@Muppetteer](https://github.com/Muppetteer) in
+  [#539](https://github.com/krinkuto11/streamflow/issues/539).
+
 - Teamarr Preflight changelog cards show the channel/event and separate freshly
   checked streams, reused successful measurements and other skipped sources.
   Open the stream results in one click, with original successful check times
