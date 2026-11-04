@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Teamarr Preflight changelog cards show the channel/event and separate freshly
+  checked streams, reused successful measurements and other skipped sources.
+  Open the stream results in one click, with original successful check times
+  for reused results. Older entries without reuse evidence remain labelled as
+  unrecorded. Suggested by [@Muppetteer](https://github.com/Muppetteer) in
+  [#528](https://github.com/krinkuto11/streamflow/issues/528#issuecomment-6620254099).
+
 ### Security
 
 - Incomplete EPG responses use fixed retry guidance instead of exception text,

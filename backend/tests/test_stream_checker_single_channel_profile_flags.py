@@ -95,6 +95,46 @@ def _make_mock_acm(profile):
     return acm
 
 
+def test_preflight_changelog_preserves_bounded_public_probe_and_reuse_evidence():
+    from apps.stream.stream_checker_service import StreamCheckerService
+
+    profile = _make_profile(checking_enabled=True)
+    streams = [{'id': 11, 'name': 'Retained feed', 'url': 'http://provider.invalid/11', 'stream_stats': {}}]
+    inspection = {'streams': [
+        {'stream_id': 11, 'stream_name': 'Retained feed', 'measurement_source': 'previous_measurement',
+         'reason': 'known_good_reused', 'measurement_checked_at': '2026-11-04T10:00:00Z',
+         'stream_url': 'http://private.invalid/user/password'},
+        {'stream_id': 12, 'stream_name': 'Removed feed', 'status': 'dead', 'measurement_source': 'current_check'},
+    ], 'private_diagnostics': 'private'}
+    udi = _make_mock_udi(52, 'Fixture channel', streams)
+    session_manager = Mock()
+    session_manager.get_channels_in_active_sessions.return_value = []
+    with patch('stream_checker_service.get_udi_manager', return_value=udi), patch(
+        'stream_checker_service.StreamCheckConfig', return_value=_make_mock_config()
+    ), patch('stream_checker_service.get_automation_config_manager', return_value=_make_mock_acm(profile)), patch(
+        'stream_checker_service.get_session_manager', return_value=session_manager
+    ), patch('stream_checker_service.fetch_channel_streams', return_value=streams):
+        service = StreamCheckerService()
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._check_channel = Mock(return_value={
+            'dead_streams_count': 1, 'analyzed_streams': [], 'preflight_inspection': inspection,
+        })
+        service.dead_streams_tracker = Mock()
+        service.dead_streams_tracker.get_dead_streams_for_channel.return_value = {}
+        service.dead_streams_tracker.cleanup_removed_streams.return_value = 0
+        service.changelog = Mock()
+        result = service.check_single_channel(channel_id=52, run_mode='teamarr_preflight', force_check=True)
+
+    assert result['success'] is True
+    recorded = service.changelog.add_single_channel_check_entry.call_args.kwargs['check_stats']['preflight_inspection']
+    assert [row['stream_id'] for row in recorded['streams']] == [11, 12]
+    assert recorded['streams'][0]['reason'] == 'known_good_reused'
+    assert recorded['streams'][0]['measurement_checked_at'] == '2026-11-04T10:00:00Z'
+    assert recorded['streams'][1]['measurement_source'] == 'current_check'
+    assert 'private' not in json.dumps(recorded)
+    assert recorded is not inspection
+
+
 def test_single_channel_fetch_clear_cannot_resurrect_progress():
     from apps.stream.stream_checker_service import StreamCheckerService
 
