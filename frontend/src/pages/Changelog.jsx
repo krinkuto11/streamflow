@@ -15,6 +15,8 @@ import {
 } from '@/lib/changelog-run-summary.js'
 import { formatDuration } from '@/lib/time-format.js'
 import { TELEMETRY_DATE_RANGES } from '@/lib/telemetry-retention.js'
+import { getChangelogPreflightSummary } from '@/lib/changelog-preflight-summary.js'
+import { ChangelogPreflightSummary } from '@/components/ChangelogPreflightSummary.jsx'
 import { getQualityReasonDisplay, getVisualProbeLabel } from '@/lib/quality-reason-display.js'
 import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown, Download, EyeOff } from 'lucide-react'
 
@@ -716,6 +718,7 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
   const staleWarnings = getChangelogStaleWarnings(details)
   const visibilityMetrics = getChangelogVisibilityMetrics(details)
   const visibilityEvents = getChangelogVisibilityEvents(details)
+  const preflightSummary = getChangelogPreflightSummary(entry)
 
   return (
     <Card className={`min-w-0 max-w-full overflow-hidden shadow-md transition-shadow hover:shadow-lg dark:bg-card/40 ${action === 'automation_run' ? 'border-2 border-blue-500 dark:border-green-500' : 'border-muted/60'}`}>
@@ -784,6 +787,8 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
             ))}
           </div>
         )}
+
+        <ChangelogPreflightSummary summary={preflightSummary} />
 
         {staleWarnings.length > 0 && (
           <div className="mt-3 flex min-w-0 flex-wrap gap-2 border-t pt-3">

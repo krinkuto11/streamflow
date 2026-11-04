@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from apps.core.log_sanitizer import stream_ref
 from apps.stream.quality_report_fields import VISUAL_PROBE_REPORT_FIELDS
+from apps.stream.preflight_inspection import public_inspection
 from apps.core.stream_stats_utils import extract_stream_stats, format_stream_stats_for_display, calculate_channel_averages
 from .refresh_scope import _resolve_single_channel_m3u_refresh_scope
 
@@ -964,6 +965,12 @@ class CheckerSingleChannelMixin:
                 'stream_details': [],
                 'skipped_streams': check_result.get('skipped_streams', []) if checking_enabled else [],
             }
+            if checking_enabled and profile_progress_context.get('run_mode') == 'teamarr_preflight':
+                # Keep the bounded public snapshot, including removed candidates and
+                # original measurement times, with the changelog's channel stats.
+                inspection = public_inspection(check_result.get('preflight_inspection'))
+                if inspection is not None:
+                    check_stats['preflight_inspection'] = inspection
 
             # Sort streams by persisted quality_score descending so the
             # highest-ranked streams (including any that were loop-probed)

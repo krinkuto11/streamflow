@@ -23,6 +23,16 @@ sources. If all sources are already good, the checkpoint completes without media
 probes or provider-slot reservations. Stream details identify the reused result
 and its previous successful check time.
 
+In **Changelog**, select **Teamarr Preflight** in the **All Sources** filter.
+Each preflight card shows the channel and event without expanding details, plus
+**Freshly checked**, **Known good reused** and **Other skipped** counts. Open
+**Stream results** once to compare individual sources and providers, results,
+resolution, bitrate and the original successful check time for reused results.
+Removed candidates remain in this snapshot. Opening it does not request a new
+probe. Historical entries without a recorded snapshot show their existing stream
+details with reuse marked as unrecorded. For size-limited snapshots, counts
+explicitly cover only the shown results.
+
 A successful technical measurement does not prove that an event is being shown,
 and a skipped source can fail after that measurement. This option reduces probes;
 it does not add continuous monitoring.
