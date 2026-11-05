@@ -1,3 +1,4 @@
+from apps.core.provider_profile_access import ProfileAccess, ProfileAccessCache
 #!/usr/bin/env python3
 """Regression tests for stream-checker queue clear/abort lifecycle."""
 
@@ -2735,6 +2736,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
 
         self.assertIsNone(active_skip)
 
+    @patch.object(ProfileAccessCache, '_get_locked', lambda self, force=False: ProfileAccess(True))
     def test_account_without_profiles_reaches_atomic_account_fallback(self):
         from apps.udi.manager import UDIManager
 
