@@ -24,6 +24,7 @@ import re
 import threading
 import time
 from apps.core.operation_timing import STREAM_OPERATION_TIMINGS
+from apps.core.provider_profile_access import checking_account, checking_accounts, account_access_reason
 import uuid
 from collections import defaultdict
 from contextlib import ExitStack, nullcontext
@@ -447,6 +448,7 @@ def _account_authority_fingerprint(
 
     sort_key = lambda item: (type(item[0]).__name__, str(item[0]))
     return (
+        account.get("_streamflow_profile_access"),
         account_limit,
         tuple(sorted(active_profile_records, key=sort_key)),
         tuple(sorted(route_limits.items())),
@@ -621,7 +623,7 @@ class AccountStreamLimiter:
                 # Compatibility for older embedders/test doubles. Current
                 # UDIManager always advertises and supplies the atomic lease.
                 account = authority_stack.enter_context(
-                    nullcontext(account_getter(account_id))
+                    nullcontext(checking_account(self.udi_manager, account_id))
                 )
             return authority_stack, account
         except Exception as exc:
@@ -868,10 +870,23 @@ class AccountStreamLimiter:
                 return False, 0, 'provider_usage_unavailable'
             if not _usage_mapping_is_trusted(context, contextual=True):
                 return False, 0, 'provider_usage_unavailable'
-            contexts = [
-                _usage_context(context, profile_id)
-                for profile_id in context
-            ]
+            # Distinct forbidden credentials do not consume this user's check
+            # capacity. Forbidden aliases of an allowed route still do, and
+            # unknown historical usage remains conservatively counted.
+            relevant_ids = set(context)
+            if getattr(type(self.udi_manager), 'supports_provider_profile_access', False) is True:
+                account = checking_account(self.udi_manager, account_id)
+                if isinstance(account, dict) and account.get('_streamflow_raw_url_allowed') is False:
+                    _, _, aliases, components = _build_profile_route_snapshot(account.get('profiles', []))
+                    allowed_aliases = set().union(*components.values()) if components else set()
+                    with self.lock:
+                        history = self.account_profile_usage_route_keys.get(account_id, {})
+                        aliases = {key: set(value) | set(history.get(key, set()))
+                                   for key, value in aliases.items()}
+                    relevant_ids = {profile_id for profile_id in context
+                                    if not aliases.get(_strict_positive_id(profile_id))
+                                    or aliases[_strict_positive_id(profile_id)] & allowed_aliases}
+            contexts = [_usage_context(context, profile_id) for profile_id in relevant_ids]
             active_count = sum(item['active_streams'] for item in contexts)
             if any(item['real_viewer_streams'] > 0 for item in contexts):
                 reason = 'active_viewers'
@@ -920,6 +935,9 @@ class AccountStreamLimiter:
         if normalized_account_id is None:
             return 0
         account_id = normalized_account_id
+        if getattr(type(self.udi_manager), 'supports_provider_profile_access', False) is True:
+            if account_access_reason(checking_account(self.udi_manager, account_id)):
+                return 0
         with self.lock:
             if not self._account_authority_is_trusted_locked(account_id):
                 return 0
@@ -985,6 +1003,10 @@ class AccountStreamLimiter:
         last_wait_reason = 'timeout'
 
         while True:
+            if getattr(type(self.udi_manager), 'supports_provider_profile_access', False) is True:
+                access_reason = account_access_reason(checking_account(self.udi_manager, account_id))
+                if access_reason:
+                    return AcquireResult(False, access_reason)
             usage_available, active_count, usage_reason = (
                 self._get_trusted_account_usage(account_id)
             )
@@ -1158,7 +1180,7 @@ class AccountStreamLimiter:
 
         try:
             account_getter = getattr(self.udi_manager, 'get_m3u_account_by_id', None)
-            account = account_getter(account_id) if callable(account_getter) else None
+            account = checking_account(self.udi_manager, account_id) if callable(account_getter) else None
         except Exception as e:
             logger.warning(f"Could not get account {account_id} while reserving profile: {e}")
             return (False, 'provider_profile_unavailable', None, '')
@@ -1175,6 +1197,9 @@ class AccountStreamLimiter:
         ):
             logger.warning("Account %s returned mismatched provider authority", account_id)
             return (False, 'provider_profile_unavailable', None, '')
+        access_reason = account_access_reason(account)
+        if access_reason:
+            return (False, access_reason, None, '')
         initial_authority_fingerprint = _account_authority_fingerprint(
             account,
             account_id,
@@ -1709,7 +1734,7 @@ class AccountStreamLimiter:
 
         try:
             account_getter = getattr(self.udi_manager, 'get_m3u_account_by_id', None)
-            account = account_getter(account_id) if callable(account_getter) else None
+            account = checking_account(self.udi_manager, account_id) if callable(account_getter) else None
         except Exception as e:
             logger.warning(f"Could not get account {account_id} while building profile slot snapshot: {e}")
             return []
@@ -2088,7 +2113,7 @@ class AccountStreamLimiter:
         if resolved_account_id is not None:
             account_getter = getattr(self.udi_manager, 'get_m3u_account_by_id', None)
             try:
-                current_account = account_getter(resolved_account_id) if callable(account_getter) else None
+                current_account = checking_account(self.udi_manager, resolved_account_id) if callable(account_getter) else None
                 if (
                     not isinstance(current_account, dict)
                     or (
@@ -2646,6 +2671,8 @@ class SmartStreamScheduler:
                         'viewer_preempted': 'viewer_preempted',
                         'profile_url_incompatible': 'profile_url_incompatible',
                         'provider_profile_unavailable': 'provider_profile_unavailable',
+                        'provider_profile_not_allowed': 'provider_profile_not_allowed',
+                        'provider_permissions_unverified': 'provider_permissions_unverified',
                     }.get(reason_detail, 'provider_capacity_unavailable')
                     return {
                         'stream_id': stream['id'],
@@ -3101,6 +3128,8 @@ def initialize_account_limits(accounts: List[Dict[str, Any]]):
         accounts: List of M3U account dictionaries with 'id', 'max_streams', and optionally 'profiles' fields
     """
     limiter = get_account_limiter()
+    if isinstance(accounts, list):
+        accounts = checking_accounts(limiter.udi_manager, accounts)
 
     normalized_accounts: List[Dict[str, Any]] = []
     account_ids: set[int] = set()

@@ -333,7 +333,8 @@ class CheckerConcurrentChannelMixin:
             reuse_check = None
             if run_mode == 'teamarr_preflight' and preflight_context is not None:
                 from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
-                reuse_accounts = udi.get_m3u_accounts()
+                from apps.core.provider_profile_access import checking_accounts
+                reuse_accounts = checking_accounts(udi, udi.get_m3u_accounts())
                 reuse_check = get_teamarr_preflight_service().prepare_stream_reuse(
                     preflight_context, channel=channel_data, streams=streams,
                     profile=profile, analysis_config=self.config.get('stream_analysis', {}),

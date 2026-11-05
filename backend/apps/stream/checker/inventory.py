@@ -1,6 +1,7 @@
 """Inventory responsibilities for the shared StreamCheckerService instance."""
 
 import logging
+from apps.core.provider_profile_access import checking_accounts
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger("apps.stream.stream_checker_service")
@@ -9,7 +10,11 @@ logger = logging.getLogger("apps.stream.stream_checker_service")
 class CheckerInventoryMixin:
     def _preflight_source_is_dead(self, stream, udi, accounts):
         """A newer failure on any active credential route invalidates reuse."""
-        urls = {stream.get('url')}
+        access = None
+        if getattr(type(udi), 'supports_provider_profile_access', False) is True:
+            access = udi.get_provider_profile_access()
+        urls = {stream.get('url')} if access is None or access.allowed_ids is None else set()
+        accounts = checking_accounts(udi, accounts)
         account_id = self._get_stream_m3u_account_id(stream)
         for account in accounts:
             if str(account.get('id')) != str(account_id):
@@ -319,6 +324,8 @@ class CheckerInventoryMixin:
             return False
 
         try:
+            if getattr(type(udi), 'supports_provider_profile_access', False) is True:
+                udi.get_provider_profile_access(force=True)
             limiter.udi_manager = udi
         except Exception as exc:
             logger.error(

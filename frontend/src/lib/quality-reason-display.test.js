@@ -280,3 +280,15 @@ describe('getQualityReasonDisplay', () => {
     })
   })
 })
+
+
+describe('Dispatcharr provider profile permissions', () => {
+  it.each([
+    ['provider_profile_not_allowed', 'Provider profile not allowed'],
+    ['provider_permissions_unverified', 'Provider permissions unavailable'],
+  ])('explains %s without presenting it as an offline stream', (code, label) => {
+    const display = getQualityReasonDisplay({ quality_reason_detail: code })
+    expect(display.text).toContain(label)
+    expect(display.title).toContain(code)
+  })
+})

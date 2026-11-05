@@ -19,6 +19,8 @@ const REASON_LABELS = {
   max_streams_reached: 'Provider stream limit reached',
   checking_capacity: 'Check slots full',
   global_worker_limit: 'Global workers full',
+  provider_profile_not_allowed: 'Provider profile not allowed',
+  provider_permissions_unverified: 'Provider permissions unavailable',
   provider_capacity: 'Provider capacity unavailable',
   provider_capacity_unavailable: 'Provider capacity unavailable',
   provider_wait_timeout: 'Provider wait timed out',
@@ -69,6 +71,8 @@ const STATIC_REASON_DETAILS = {
   provider_capacity: 'No provider or profile check slot is free',
   provider_capacity_unavailable: 'No provider or profile check slot is free',
   provider_wait_timeout: 'No provider or profile slot became free in time',
+  provider_profile_not_allowed: 'The Dispatcharr user has no allowed active profile for this provider',
+  provider_permissions_unverified: 'Could not verify the Dispatcharr user?s provider profile permissions; check skipped',
 }
 
 const formatNumber = (value, suffix = '') => {
