@@ -206,7 +206,7 @@ account-aware limits. Progress is logged periodically during large runs.
 
 ## Dispatcharr provider profile permissions
 
-StreamFlow applies the authenticated Dispatcharr user's `custom_properties.allowed_m3u_profile_ids` to provider probes. The value is read from `GET /api/accounts/users/me/` with the configured API key or username/password account. A missing or null value is unrestricted, an empty list allows no provider profiles, and a list of IDs allows only those active profiles. No additional StreamFlow setting is needed.
+StreamFlow applies the authenticated Dispatcharr user's `custom_properties.allowed_m3u_profile_ids` to provider probes. The value is read from `GET /api/accounts/users/me/` with the configured API key or username/password account. A missing or null value is unrestricted, an empty list allows no provider profiles, and a list of IDs allows only those active profiles. No additional StreamFlow setting is needed. Configure the allowlist in Dispatcharr: **System -> Users -> Edit user -> Permissions -> Allowed Provider Profiles**. Sign in as another administrator to edit the StreamFlow user; Dispatcharr hides the Permissions tab when editing your own account.
 
 The full provider inventory remains available for viewer accounting. Only allowed profiles contribute checker capacity or appear as usable slots in the Stream Checker Profile Matrix. Viewers on another profile that shares the same credential route still consume its capacity; viewers on unrelated forbidden credentials do not consume allowed-profile capacity.
 

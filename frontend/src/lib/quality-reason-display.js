@@ -72,7 +72,7 @@ const STATIC_REASON_DETAILS = {
   provider_capacity_unavailable: 'No provider or profile check slot is free',
   provider_wait_timeout: 'No provider or profile slot became free in time',
   provider_profile_not_allowed: 'The Dispatcharr user has no allowed active profile for this provider',
-  provider_permissions_unverified: 'Could not verify the Dispatcharr user?s provider profile permissions; check skipped',
+  provider_permissions_unverified: 'Could not verify provider profile permissions for the Dispatcharr user; check skipped',
 }
 
 const formatNumber = (value, suffix = '') => {
