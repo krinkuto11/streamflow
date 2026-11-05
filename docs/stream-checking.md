@@ -202,3 +202,14 @@ is `grace_period`.
 
 Concurrent stream probes are handled inside the stream checker service with
 account-aware limits. Progress is logged periodically during large runs.
+
+
+## Dispatcharr provider profile permissions
+
+StreamFlow applies the authenticated Dispatcharr user's `custom_properties.allowed_m3u_profile_ids` to provider probes. The value is read from `GET /api/accounts/users/me/` with the configured API key or username/password account. A missing or null value is unrestricted, an empty list allows no provider profiles, and a list of IDs allows only those active profiles. No additional StreamFlow setting is needed. Configure the allowlist in Dispatcharr: **System -> Users -> Edit user -> Permissions -> Allowed Provider Profiles**. Sign in as another administrator to edit the StreamFlow user; Dispatcharr hides the Permissions tab when editing your own account.
+
+The full provider inventory remains available for viewer accounting. Only allowed profiles contribute checker capacity or appear as usable slots in the Stream Checker Profile Matrix. Viewers on another profile that shares the same credential route still consume its capacity; viewers on unrelated forbidden credentials do not consume allowed-profile capacity.
+
+Parallel, sequential, one-off, bitrate recheck, loop and Shadow Monitor probes use the same permissions and reservation rules. Restricted users never fall back to the original provider URL when no allowed profile is usable. Missing or unreadable permissions skip a check with an explicit reason and do not produce a new dead-stream result. Existing dead-stream history is retained; use a deliberate recheck to reevaluate earlier failures.
+
+Rights are cached in memory for at most 15 seconds and refreshed at the start of ordinary probe runs. Failed refreshes revoke check permission and are retried after a short backoff. Connection identity changes invalidate cached rights. A changed permission snapshot cannot commit a reservation resolved against older permissions; active probes use the existing preemption checks to stop when their reservation loses authority.

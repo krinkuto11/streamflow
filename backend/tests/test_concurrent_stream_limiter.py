@@ -3927,6 +3927,13 @@ class TestSmartStreamScheduler(unittest.TestCase):
 class TestInitializeAccountLimits(unittest.TestCase):
     """Test cases for initialize_account_limits function."""
     
+    def setUp(self):
+        from apps.core.provider_profile_access import ProfileAccess
+        self.access_patch = patch('apps.udi.manager.UDIManager.get_provider_profile_access',
+                                  return_value=ProfileAccess(True))
+        self.access_patch.start()
+        self.addCleanup(self.access_patch.stop)
+
     def test_initialize_single_account(self):
         """Test initializing a single account."""
         limiter = get_account_limiter()
@@ -4224,6 +4231,14 @@ class TestInitializeAccountLimits(unittest.TestCase):
 
 class TestProfileAwareStreamChecking(unittest.TestCase):
     """Test cases for profile-aware stream checking via UDI."""
+
+    def setUp(self):
+        from apps.core.provider_profile_access import ProfileAccess
+        self.access_patch = patch('apps.udi.manager.UDIManager.get_provider_profile_access',
+                                  return_value=ProfileAccess(True))
+        self.access_patch.start()
+        self.addCleanup(self.access_patch.stop)
+
 
     def _seed_m3u_accounts(self, udi, accounts):
         """Seed the UDI singleton account cache and rebuild lookup indexes."""

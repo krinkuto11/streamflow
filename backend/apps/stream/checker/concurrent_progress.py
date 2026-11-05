@@ -182,7 +182,10 @@ def create_concurrent_progress(
                         else 'provider_limit_wait_timeout'
                     )
                     stream_status['reason_detail'] = skipped_reason
-                    stream_status['quality_reason'] = 'provider_capacity'
+                    permission_skip = skipped_reason in ('provider_profile_not_allowed', 'provider_permissions_unverified')
+                    if permission_skip:
+                        stream_status['status'] = 'skipped'
+                    stream_status['quality_reason'] = skipped_reason if permission_skip else 'provider_capacity'
                     stream_status['quality_reason_detail'] = skipped_reason
                     stream_status['quality_reason_context'] = {}
                     stream_status['score'] = None

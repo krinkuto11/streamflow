@@ -14,6 +14,21 @@ logger = logging.getLogger("apps.stream.stream_checker_service")
 
 
 class CheckerSequentialChannelMixin:
+    def _probe_sequential_stream(self, *, stream, udi, **params):
+        # Production sequential probes use the same admission and exact URL
+        # reservation as parallel/one-off checks, including bitrate retries.
+        if getattr(type(udi), 'supports_provider_profile_access', False) is not True:
+            return self._checker_analyze_stream(**params)
+        for key in ('stream_url', 'stream_id', 'stream_name'):
+            params.pop(key, None)
+        results = self._run_capacity_limited_stream_probes([stream], udi=udi, **params)
+        if results:
+            return results[0]
+        return {'stream_id': stream['id'], 'stream_name': stream.get('name'),
+                'stream_url': stream.get('url'), 'status': 'SKIPPED_PROVIDER_LIMIT',
+                'provider_limit_skipped': True, 'cached': False,
+                'skipped_reason': 'provider_permissions_unverified'}
+
     def _check_channel_sequential(
         self,
         channel_id: int,
@@ -513,7 +528,8 @@ class CheckerSequentialChannelMixin:
                     stream_url = udi.apply_profile_url_transformation(stream)
 
                 bitrate_recheck_enabled = self._is_bitrate_recheck_enabled()
-                analyzed = self._checker_analyze_stream(
+                analyzed = self._probe_sequential_stream(
+                        stream=stream, udi=udi,
                     stream_url=stream_url,
                     stream_id=stream['id'],
                     stream_name=stream.get('name', 'Unknown'),
@@ -536,8 +552,20 @@ class CheckerSequentialChannelMixin:
                     retry_missing_bitrate=bitrate_recheck_enabled,
                 )
 
+                if analyzed.get('provider_limit_skipped'):
+                    stream_statuses[stream['id']].update(
+                        status='skipped', reason=analyzed.get('skipped_reason'),
+                        reason_detail=analyzed.get('skipped_reason'),
+                    )
+                    if analyzed.get('cached'):
+                        analyzed['score'] = self._calculate_stream_score(
+                            analyzed, priority_m3u_ids, priority_mode, scoring_weights)
+                        analyzed_streams.append(analyzed)
+                    continue
+
                 def recheck_sequential_bitrate(_stream, _initial):
-                    return self._checker_analyze_stream(
+                    return self._probe_sequential_stream(
+                        stream=stream, udi=udi,
                         stream_url=stream_url,
                         stream_id=stream['id'],
                         stream_name=stream.get('name', 'Unknown'),
@@ -840,7 +868,8 @@ class CheckerSequentialChannelMixin:
                     if udi:
                         stream_url = udi.apply_profile_url_transformation(stream)
 
-                    analyzed = self._checker_analyze_stream(
+                    analyzed = self._probe_sequential_stream(
+                        stream=stream, udi=udi,
                         stream_url=stream_url,
                         stream_id=stream['id'],
                         stream_name=stream.get('name', 'Unknown'),
@@ -860,6 +889,12 @@ class CheckerSequentialChannelMixin:
                         freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80),
                         hardware_acceleration=analysis_params.get('hardware_acceleration')
                     )
+                    if analyzed.get('provider_limit_skipped'):
+                        if analyzed.get('cached'):
+                            analyzed['score'] = self._calculate_stream_score(
+                                analyzed, priority_m3u_ids, priority_mode, scoring_weights)
+                            analyzed_streams.append(analyzed)
+                        continue
                     self._update_stream_stats(analyzed)
                     # This legacy retry path uses global quality weights. Keep
                     # that baseline intact and apply only eligible history.

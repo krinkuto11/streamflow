@@ -1,3 +1,4 @@
+from apps.core.provider_profile_access import ProfileAccess, ProfileAccessCache
 #!/usr/bin/env python3
 import os
 import sys
@@ -135,6 +136,7 @@ class TestM3uAccountIdPriority(unittest.TestCase):
 
         self.assertEqual([stream["stream_id"] for stream in sorted_streams], [3, 1, 2])
 
+    @patch.object(ProfileAccessCache, '_get_locked', lambda self, force=False: ProfileAccess(True))
     def test_udi_profile_lookup_accepts_m3u_account_id(self):
         from apps.udi.manager import UDIManager
 
@@ -162,6 +164,7 @@ class TestM3uAccountIdPriority(unittest.TestCase):
         self.assertEqual(profile["id"], 51)
         self.assertEqual(udi._stream_account_id[100], 5)
 
+    @patch.object(ProfileAccessCache, '_get_locked', lambda self, force=False: ProfileAccess(True))
     def test_udi_account_without_active_profiles_defers_to_account_limiter(self):
         from apps.udi.manager import UDIManager
 
@@ -465,6 +468,7 @@ class TestM3uAccountIdPriority(unittest.TestCase):
             1,
         )
 
+    @patch.object(ProfileAccessCache, '_get_locked', lambda self, force=False: ProfileAccess(True))
     def test_removed_profile_session_blocks_identical_active_route_end_to_end(self):
         """UDI history and limiter route history jointly prevent overbooking."""
         from apps.stream.concurrent_stream_limiter import AccountStreamLimiter

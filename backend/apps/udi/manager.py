@@ -48,6 +48,7 @@ from apps.core.request_coalescing import SingleFlight
 from apps.udi.cache import UDICache
 from apps.udi.storage import UDIStorage
 from apps.core.auth import _get_auth_headers
+from apps.core.provider_profile_access import ProfileAccessCache, checking_account, account_access_reason
 from apps.core.stream_protocols import has_supported_stream_protocol
 
 from apps.core.logging_config import setup_logging
@@ -196,10 +197,12 @@ class UDIManager(ChannelMetadataMixin):
     # Consumers must check the concrete class marker rather than trusting a
     # dynamically-created Mock attribute before relying on lease semantics.
     supports_account_authority_lease = True
+    supports_provider_profile_access = True
     
     def __init__(self):
         """Initialize the UDI Manager (pure in-memory, no local persistence)."""
         self.fetcher = UDIFetcher()
+        self._provider_profile_access = ProfileAccessCache()
         self.cache = UDICache()
         
         self._initialized = False
@@ -1156,6 +1159,9 @@ class UDIManager(ChannelMetadataMixin):
         self._ensure_initialized()
         return self._logos_by_id.get(logo_id)
     
+    def get_provider_profile_access(self, force=False):
+        return self._provider_profile_access.get(force=force)
+
     def get_m3u_accounts(self) -> List[Dict[str, Any]]:
         """Get all M3U accounts with priority_mode merged from local config.
         
@@ -1209,10 +1215,9 @@ class UDIManager(ChannelMetadataMixin):
             if isinstance(account_id, bool)
             else _normalize_udi_identifier(account_id)
         )
-        with self._lock:
+        with self._provider_profile_access.lease() as access, self._lock:
             account = self._m3u_accounts_by_id.get(normalized_account_id)
-            snapshot = copy.deepcopy(account) if account is not None else None
-            yield snapshot
+            yield access.project_account(account)
     
     def get_channel_profiles(self) -> List[Dict[str, Any]]:
         """Get all channel profiles.
@@ -2859,9 +2864,9 @@ class UDIManager(ChannelMetadataMixin):
             return None
         
         # Get the account and its profiles
-        account = self.get_m3u_account_by_id(account_id)
-        if not account:
-            logger.warning(f"Account {account_id} not found for stream {stream_id}")
+        account = checking_account(self, account_id)
+        if not account or account_access_reason(account):
+            logger.warning(f"Account {account_id} unavailable for stream {stream_id}")
             return None
         
         account_name = account.get('name', f'Account {account_id}')
@@ -2953,7 +2958,10 @@ class UDIManager(ChannelMetadataMixin):
             # Custom stream without M3U account - can always run
             return (True, None)
 
-        account = self.get_m3u_account_by_id(account_id)
+        account = checking_account(self, account_id)
+        access_reason = account_access_reason(account)
+        if access_reason:
+            return (False, access_reason)
         active_profiles = [
             profile
             for profile in (account.get('profiles', []) if isinstance(account, dict) else [])
@@ -3100,6 +3108,12 @@ class UDIManager(ChannelMetadataMixin):
         if not original_url:
             return original_url
         
+        account_id = self._get_stream_m3u_account_id(stream)
+        if account_id is not None:
+            access = self.get_provider_profile_access()
+            if not access.verified or (profile is not None and not access.allows(profile.get('id'))):
+                return ''
+
         # If no profile provided, try to find one
         if profile is None:
             profile = self.find_available_profile_for_stream(stream)
@@ -3108,10 +3122,10 @@ class UDIManager(ChannelMetadataMixin):
         # must pass their explicit reservation and use resolve_profile_stream_url
         # so they can fail closed rather than auto-selecting another credential.
         if not profile:
-            return original_url
+            return original_url if account_id is None or access.allowed_ids is None else ''
 
         eligible, resolved_url, _reason = self.resolve_profile_stream_url(stream, profile)
-        return resolved_url if eligible else original_url
+        return resolved_url if eligible else (original_url if account_id is None or access.allowed_ids is None else '')
     
     def _ensure_initialized(self) -> None:
         """Ensure UDI Manager is initialized before data access.
