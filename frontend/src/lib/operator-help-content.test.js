@@ -368,6 +368,7 @@ describe('operatorHelpSections', () => {
     )
 
     expect(references.map(reference => `${reference.topicId}:${reference.settingName}`)).toEqual([
+      'automation-periods:Minimum Probe Completion (%)',
       'automation-periods:Provider Stream Cap',
       'automation-periods:Run all due periods',
       'automation-periods:Catch-up cap',

@@ -52,7 +52,9 @@ def probe_exit_failed(data):
 
 def probe_window_completion(data, minimum_percent=None):
     """Return (complete, basis); missing legacy timing keeps its old behavior."""
-    if probe_exit_failed(data):
+    if probe_exit_failed(data) or str(data.get('status') or '').lower() in {
+        'error', 'failed', 'timeout', 'stream_timeout', 'probe_timeout',
+    }:
         return False, 'ffmpeg_error'
     if minimum_percent is None:
         minimum_percent = data.get('minimum_probe_completion_percent', 80)

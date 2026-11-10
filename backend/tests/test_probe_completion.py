@@ -61,6 +61,7 @@ def test_profile_threshold_controls_retries_and_final_verdict_consistently(perce
 ])
 def test_relaxed_duration_never_accepts_probe_errors(failure):
     row = measured(probe_media_seconds=30, **failure)
+    assert not probe_window_completion(row, 0)[0]
     assert is_stream_dead(row, {'minimum_probe_completion_percent': 0}) == (True, 'offline')
 
 

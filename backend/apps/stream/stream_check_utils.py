@@ -59,6 +59,10 @@ from PIL import Image
 from apps.core.logging_config import setup_logging
 from apps.core.log_sanitizer import audit_ref as _audit_ref, scrub_urls, stream_ref, url_ref
 from apps.core.stream_protocols import effective_stream_startup_buffer, has_supported_stream_protocol
+from apps.core.probe_completion import (
+    media_window_seconds, normalize_minimum_probe_completion_percent,
+    probe_window_completion,
+)
 
 logger = setup_logging(__name__)
 
@@ -95,11 +99,6 @@ FFMPEG_HWACCEL_FAILURE_PATTERNS = (
     'cannot open',
     'unknown hwaccel',
 )
-from apps.core.probe_completion import (
-    media_window_seconds, normalize_minimum_probe_completion_percent,
-    probe_window_completion,
-)
-
 EARLY_EXIT_THRESHOLD = 0.8  # Default for diagnostic/bitrate fallback timing
 MAX_ERROR_LINES_TO_LOG = 5  # Maximum number of error lines to log from ffmpeg output
 MAX_DEBUG_LINES_TO_LOG = 10  # Maximum number of debug lines to log from ffmpeg output

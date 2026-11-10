@@ -237,6 +237,14 @@ export const operatorHelpDetailTopics = [
         effect: 'Sets the minimum portion of the requested FFmpeg duration needed for a completed probe. Successful probes with reliable output media timing and usable measurements may complete faster than wall-clock time.',
         useWhen: 'Use the advanced per-profile control when a provider needs a different minimum sample window. One-off stream checks use the default 80%.',
         risk: 'Lower percentages accept shorter samples. 0 disables only the duration rule; probe errors and enabled blank/freeze checks still apply.',
+        reference: {
+          imageSrc: '/help/minimum-probe-completion-dark.jpg',
+          triggerLabel: 'UI Screenshot',
+          alt: 'Dark mode crop of the Minimum Probe Completion profile setting.',
+          caption: 'Minimum Probe Completion is in the profile editor under Stream Checking. The default is 80%; 0 disables only the duration rule.',
+          width: 407,
+          height: 132,
+        },
       },
       {
         name: 'Provider Stream Cap',
