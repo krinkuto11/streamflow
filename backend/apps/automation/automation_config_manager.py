@@ -298,8 +298,12 @@ class AutomationConfigManager:
         extra = dict(self._normalize_extra_settings(extra_settings))
         checking = extra.get('stream_checking')
         if isinstance(checking, dict):
+            from apps.core.probe_completion import normalize_minimum_probe_completion_percent
             extra['stream_checking'] = {
                 **checking,
+                'minimum_probe_completion_percent': normalize_minimum_probe_completion_percent(
+                    checking.get('minimum_probe_completion_percent', 80),
+                ),
                 'provider_stream_limit': self._coerce_non_negative_int(
                     checking.get('provider_stream_limit', 0),
                 ),

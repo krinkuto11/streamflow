@@ -547,20 +547,27 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
             _analysis_failure_context(stream_data),
         )
 
-    EARLY_EXIT_THRESHOLD = 0.8
-    elapsed  = stream_data.get('elapsed_time')
-    expected = stream_data.get('ffmpeg_duration')
-    if (
-        elapsed is not None
-        and expected is not None
-        and expected > 0
-        and elapsed < expected * EARLY_EXIT_THRESHOLD
-    ):
+    from apps.core.probe_completion import probe_exit_failed, probe_window_completion
+    if probe_exit_failed(stream_data):
+        return DeadStreamResult(True, 'offline', 'error', _analysis_failure_context(stream_data))
+    completed, basis = probe_window_completion(
+        stream_data, (config or {}).get('minimum_probe_completion_percent'),
+    )
+    if not completed:
         return DeadStreamResult(
             True,
             'unstable',
             'probe_exited_early',
-            {'actual_seconds': elapsed, 'expected_seconds': expected},
+            {
+                'actual_seconds': stream_data.get('elapsed_time'),
+                'expected_seconds': stream_data.get('ffmpeg_duration'),
+                'media_seconds': stream_data.get('probe_media_seconds'),
+                'minimum_completion_percent': (config or {}).get(
+                    'minimum_probe_completion_percent',
+                    stream_data.get('minimum_probe_completion_percent', 80),
+                ),
+                'completion_basis': basis,
+            },
         )
 
     stream_stats = stream_data.get('stream_stats')

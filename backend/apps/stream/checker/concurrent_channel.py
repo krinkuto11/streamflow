@@ -730,6 +730,9 @@ class CheckerConcurrentChannelMixin:
                         capacity_transition_lock=stream_statuses_lock,
                         probe_slots=getattr(self, '_preflight_probe_slots', None),
                         ffmpeg_duration=analysis_params.get('ffmpeg_duration', 30),
+                        minimum_probe_completion_percent=_threshold_config.get(
+                            'minimum_probe_completion_percent', 80,
+                        ),
                         timeout=analysis_params.get('timeout', 30),
                         retries=analysis_params.get('retries', 1),
                         retry_delay=analysis_params.get('retry_delay', 10),

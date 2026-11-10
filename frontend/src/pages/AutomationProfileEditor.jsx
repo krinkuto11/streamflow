@@ -40,6 +40,7 @@ const DEFAULT_PROFILE = {
         freeze_check_enabled: false,
         stream_limit: 0,
         provider_stream_limit: 0,
+        minimum_probe_completion_percent: 80,
         min_resolution: 'any',
         min_fps: 0,
         min_bitrate: 0,
@@ -566,6 +567,22 @@ export default function AutomationProfileEditor() {
                                                 />
                                                 <p className="text-[10px] text-muted-foreground">
                                                     0 = Disabled. Prefer up to this many streams per provider, then fill remaining channel slots with the best eligible streams even above this cap. Requires a Stream Limit per Channel greater than 0.
+                                                </p>
+                                            </div>
+
+                                            <div className="space-y-2">
+                                                <Label htmlFor="minimum_probe_completion_percent">Minimum Probe Completion (%)</Label>
+                                                <Input
+                                                    id="minimum_probe_completion_percent"
+                                                    type="number"
+                                                    min="0"
+                                                    max="100"
+                                                    step="1"
+                                                    value={profile.stream_checking.minimum_probe_completion_percent ?? 80}
+                                                    onChange={(e) => updateProfile('stream_checking.minimum_probe_completion_percent', Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+                                                />
+                                                <p className="text-[10px] text-muted-foreground">
+                                                    Advanced. Default: 80%. Minimum portion of the requested FFmpeg duration required before a probe is considered complete. Successful probes with reliable media timing and valid measurements can complete faster than real time. 0 disables only this duration check; errors and enabled blank/freeze checks still apply. Lower values can accept shorter samples.
                                                 </p>
                                             </div>
 

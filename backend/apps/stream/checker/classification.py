@@ -27,6 +27,10 @@ class CheckerClassificationMixin:
             second argument.  Only non-zero thresholds are included.
         """
         config: Dict[str, Any] = {}
+        from apps.core.probe_completion import normalize_minimum_probe_completion_percent
+        config['minimum_probe_completion_percent'] = normalize_minimum_probe_completion_percent(
+            stream_checking.get('minimum_probe_completion_percent', 80),
+        )
         min_res = stream_checking.get('min_resolution', 'any')
         if min_res in ('2160p', '4k'):
             config['min_resolution_width'], config['min_resolution_height'] = 3840, 2160
@@ -101,6 +105,11 @@ class CheckerClassificationMixin:
                 if profile:
                     stream_checking = profile.get('stream_checking', {})
                     if stream_checking.get('enabled', False):
+                        profile_config['minimum_probe_completion_percent'] = (
+                            self._build_threshold_config_from_profile(stream_checking)[
+                                'minimum_probe_completion_percent'
+                            ]
+                        )
                         # Construct config from profile settings
                         # Convert min_res string (e.g., '1080p') to dimensions
                         min_res = stream_checking.get('min_resolution', '0x0')
