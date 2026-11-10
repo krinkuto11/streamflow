@@ -59,6 +59,10 @@ from PIL import Image
 from apps.core.logging_config import setup_logging
 from apps.core.log_sanitizer import audit_ref as _audit_ref, scrub_urls, stream_ref, url_ref
 from apps.core.stream_protocols import effective_stream_startup_buffer, has_supported_stream_protocol
+from apps.core.probe_completion import (
+    media_window_seconds, normalize_minimum_probe_completion_percent,
+    probe_window_completion,
+)
 
 logger = setup_logging(__name__)
 
@@ -95,7 +99,7 @@ FFMPEG_HWACCEL_FAILURE_PATTERNS = (
     'cannot open',
     'unknown hwaccel',
 )
-EARLY_EXIT_THRESHOLD = 0.8  # Consider ffmpeg exited early if elapsed < 80% of expected duration
+EARLY_EXIT_THRESHOLD = 0.8  # Default for diagnostic/bitrate fallback timing
 MAX_ERROR_LINES_TO_LOG = 5  # Maximum number of error lines to log from ffmpeg output
 MAX_DEBUG_LINES_TO_LOG = 10  # Maximum number of debug lines to log from ffmpeg output
 
@@ -2008,6 +2012,13 @@ def get_stream_info_and_bitrate(
         progress_bitrate = None
         last_stats_line = None  # keeps updating; final line is the most stable average
         last_media_time = 0.0
+        media_progress_times = []
+        result_data['ffmpeg_exit_code'] = result.returncode
+        result_data['ffmpeg_error_detected'] = bool(re.search(
+            r'Input/output error|Connection reset by peer|Connection timed out|'
+            r'Error opening input|Error during demuxing|Server returned [45]\d\d',
+            output or '', re.IGNORECASE,
+        ))
 
         # Track Input vs Output sections so we only parse input stream codecs,
         # not decoded output formats (e.g. pcm_s16le instead of aac)
@@ -2017,6 +2028,7 @@ def get_stream_info_and_bitrate(
             progress_time = _parse_ffmpeg_progress_time(line)
             if progress_time is not None:
                 last_media_time = max(last_media_time, progress_time)
+                media_progress_times.append(progress_time)
 
             # ── Section tracking ─────────────────────────────────────────────
             if 'Input #' in line:
@@ -2228,6 +2240,9 @@ def get_stream_info_and_bitrate(
                 ]
                 _log_ffmpeg_errors(output, logger, error_patterns)
 
+        result_data['probe_media_seconds'] = media_window_seconds(media_progress_times, duration)
+        if result.returncode != 0 or result_data['ffmpeg_error_detected']:
+            result_data['status'] = 'Error'
         apply_visual_probe()
 
         logger.debug(f"  Analysis completed in {elapsed:.2f}s")
@@ -2829,6 +2844,7 @@ def analyze_stream(
     preempt_check: Optional[Callable[[], bool]] = None,
     defer_missing_bitrate_retry: bool = False,
     retry_missing_bitrate: bool = True,
+    minimum_probe_completion_percent: float = 80,
 ) -> Dict[str, Any]:
     """
     Perform complete stream analysis including codec, resolution, FPS, bitrate, and audio.
@@ -3018,6 +3034,12 @@ def analyze_stream(
                     'audio_bitrate': result_data['audio_bitrate'],
                     'status': result_data['status'],
                     'elapsed_time': result_data.get('elapsed_time', 0),
+                    'ffmpeg_exit_code': result_data.get('ffmpeg_exit_code'),
+                    'ffmpeg_error_detected': result_data.get('ffmpeg_error_detected', False),
+                    'probe_media_seconds': result_data.get('probe_media_seconds'),
+                    'minimum_probe_completion_percent': normalize_minimum_probe_completion_percent(
+                        minimum_probe_completion_percent,
+                    ),
                     'ffmpeg_duration': ffmpeg_duration,
                     'ffmpeg_duration_seconds': result_data.get('ffmpeg_duration_seconds', ffmpeg_duration),
                     'timeout_seconds': result_data.get(
@@ -3145,7 +3167,7 @@ def analyze_stream(
                     # data that is not representative of sustained delivery.
                     # Give it another attempt rather than accepting the result.
                     elapsed  = result_data.get('elapsed_time', ffmpeg_duration)
-                    completed = elapsed >= ffmpeg_duration * EARLY_EXIT_THRESHOLD
+                    completed, result['probe_completion_basis'] = probe_window_completion(result)
                     missing_bitrate = result.get('bitrate_kbps') is None
                     if completed and missing_bitrate and not retry_missing_bitrate:
                         logger.info(

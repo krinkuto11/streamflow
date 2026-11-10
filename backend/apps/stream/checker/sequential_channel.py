@@ -534,6 +534,9 @@ class CheckerSequentialChannelMixin:
                     stream_id=stream['id'],
                     stream_name=stream.get('name', 'Unknown'),
                     ffmpeg_duration=analysis_params.get('ffmpeg_duration', 20),
+                    minimum_probe_completion_percent=_threshold_config.get(
+                        'minimum_probe_completion_percent', 80,
+                    ),
                     timeout=analysis_params.get('timeout', 30),
                     retries=analysis_params.get('retries', 1),
                     retry_delay=analysis_params.get('retry_delay', 10),
@@ -570,6 +573,9 @@ class CheckerSequentialChannelMixin:
                         stream_id=stream['id'],
                         stream_name=stream.get('name', 'Unknown'),
                         ffmpeg_duration=analysis_params.get('ffmpeg_duration', 20),
+                        minimum_probe_completion_percent=_threshold_config.get(
+                            'minimum_probe_completion_percent', 80,
+                        ),
                         timeout=analysis_params.get('timeout', 30),
                         retries=0,
                         retry_delay=0,
@@ -874,6 +880,9 @@ class CheckerSequentialChannelMixin:
                         stream_id=stream['id'],
                         stream_name=stream.get('name', 'Unknown'),
                         ffmpeg_duration=analysis_params.get('ffmpeg_duration', 20),
+                        minimum_probe_completion_percent=_threshold_config.get(
+                            'minimum_probe_completion_percent', 80,
+                        ),
                         timeout=analysis_params.get('timeout', 30),
                         retries=analysis_params.get('retries', 1),
                         retry_delay=analysis_params.get('retry_delay', 10),

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Probe completion uses reliable processed media time as well as wall-clock
+  runtime, with successful FFmpeg exit and usable measurements required for
+  accelerated probes. Profiles expose **Minimum Probe Completion (%)** under
+  **Settings -> Profiles -> Edit profile -> Stream Checking**, defaulting to
+  80%. Setting 0 disables only the duration rule; probe errors and enabled
+  blank/freeze checks still apply. Suggested by
+  [@teffi71](https://github.com/teffi71) in
+  [#544](https://github.com/krinkuto11/streamflow/issues/544).
+
 - Single-channel changelog entries show the channel name in the card heading
   and open their full stream measurements in one click. This also applies to
   historical and manual checks; Teamarr Preflight keeps its reuse summary and
