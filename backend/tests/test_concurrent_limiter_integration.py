@@ -157,6 +157,80 @@ def test_preflight_reuse_avoids_probes_and_keeps_cached_ranking(monkeypatch, seq
         assert rows[2]['measurement_source'] == 'current_check'
 
 
+@pytest.mark.parametrize('mode', ['targeted', 'incremental', 'cached', 'manual'])
+@pytest.mark.parametrize('sequential', [False, True])
+@pytest.mark.parametrize('provider_cap', [0, 3])
+def test_grace_period_applies_limits_and_resolution_order_to_all_candidates(
+    monkeypatch, mode, sequential, provider_cap,
+):
+    """Skipping probes must not exempt existing assignments from profile policy."""
+    from apps.stream.stream_checker_service import StreamCheckerService
+
+    channel_id = 548
+    streams = [
+        {'id': sid, 'name': f'Feed {sid}', 'url': f'http://provider.invalid/{sid}',
+         'm3u_account': 1 if sid <= 10 else 2,
+         'stream_stats': {'resolution': '1920x1080' if sid <= 10 else '1280x720',
+                          'source_fps': 25, 'ffmpeg_output_bitrate': 4000,
+                          'video_codec': 'h264', 'audio_codec': 'aac'}}
+        for sid in range(1, 21)
+    ]
+    # Put the higher-score 720p sources first to exercise resolution-first sorting.
+    streams.reverse()
+    udi = _make_bitrate_runtime_udi(channel_id, streams)
+    profile = {'id': 'limits', 'name': 'Limits', 'stream_checking': {
+        'enabled': True, 'stream_limit': 10, 'provider_stream_limit': provider_cap,
+        'm3u_priority_mode': 'equal', 'grace_period': True,
+        'remove_dead_streams': True, 'allow_revive': True,
+    }}
+    automation = Mock()
+    automation.get_effective_configuration.return_value = {'profile': profile, 'periods': []}
+    monkeypatch.setattr('apps.stream.stream_checker_service.get_udi_manager', lambda: udi)
+    monkeypatch.setattr('apps.stream.stream_checker_service.get_automation_config_manager', lambda: automation)
+    monkeypatch.setattr('apps.stream.stream_checker_service.fetch_channel_streams', lambda cid: streams)
+    monkeypatch.setattr('apps.stream.stream_checker_service._get_base_url', lambda: 'http://dispatcharr.invalid')
+    monkeypatch.setattr('apps.stream.stream_checker_service.get_session_manager', lambda: Mock(
+        is_channel_in_active_session=Mock(return_value=False)))
+    writer = Mock(return_value=True)
+    monkeypatch.setattr('apps.stream.stream_checker_service.update_channel_streams', writer)
+    monkeypatch.setattr('apps.stream.stream_checker_service.batch_update_stream_stats', Mock(return_value=(20, 0)))
+    checked_ids = list(range(1, 21 if mode == 'cached' else 11))
+    service = StreamCheckerService()
+    _configure_bitrate_runtime_service(service, {'channels': {str(channel_id): {
+        'checked_stream_ids': checked_ids, 'last_check': datetime.now().isoformat(),
+    }}})
+    service._check_channel_limits = Mock(return_value=None)
+    service._get_active_viewer_protected_stream_ids = Mock(return_value=set())
+    service._run_deferred_bitrate_rechecks = Mock()
+    service._calculate_stream_score = lambda row, *a, **kw: .9 if row['stream_id'] > 10 else .5
+    probed = []
+
+    def probe(**kwargs):
+        sid = kwargs['stream_id']
+        probed.append(sid)
+        return {'stream_id': sid, 'stream_name': f'Feed {sid}',
+                'stream_url': f'http://provider.invalid/{sid}', 'status': 'OK',
+                'resolution': '1920x1080' if sid <= 10 else '1280x720',
+                'fps': 25, 'bitrate_kbps': 4000, 'video_codec': 'h264', 'audio_codec': 'aac'}
+
+    monkeypatch.setattr('apps.stream.stream_checker_service.analyze_stream', probe)
+    scheduler = Mock()
+    scheduler.check_streams_with_limits.side_effect = lambda **kw: [
+        probe(stream_id=item['id']) for item in kw['streams']
+    ]
+    monkeypatch.setattr('apps.stream.concurrent_stream_limiter.get_smart_scheduler', lambda **kw: scheduler)
+    operation = service._check_channel_sequential if sequential else service._check_channel_concurrent
+    result = operation(channel_id, force_check_override=mode == 'manual',
+                       target_stream_ids=list(range(11, 21)) if mode == 'targeted' else None)
+    assert 'error' not in result
+    assert len(probed) == (0 if mode == 'cached' else 20 if mode == 'manual' else 10)
+    writer.assert_called_once()
+    selected = writer.call_args.args[1]
+    assert len(selected) == 10
+    # Soft cap: select three from each provider, then fill in resolution order.
+    assert selected == ([10, 9, 8, 7, 6, 5, 4, 20, 19, 18] if provider_cap else list(range(10, 0, -1)))
+
+
 def _configure_bitrate_runtime_service(service, tracker_updates):
     service.config.config.setdefault('concurrent_streams', {}).update({
         'enabled': True,
