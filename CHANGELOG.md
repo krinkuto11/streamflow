@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Quality checks apply the current profile's channel limit, soft provider cap
+  and measured-resolution ordering even when every source is within the grace
+  period. Cached measurements still avoid repeat probes; unchanged stream IDs
+  no longer bypass selection and ordering. Reported by
+  [@sm0keb0x](https://github.com/sm0keb0x) in
+  [#548](https://github.com/krinkuto11/streamflow/issues/548).
+
 - RTSP and RTSPS sources, including cable tuners, can pass provider profile URL
   resolution and FFmpeg quality probing. Default identity rewrites preserve the
   original URL; alternate-profile isolation and capacity limits remain enforced.

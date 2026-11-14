@@ -492,81 +492,9 @@ class CheckerConcurrentChannelMixin:
                 else:
                     logger.info(f"All {len(streams)} streams have been recently checked (within 2h immunity), using cached scores")
 
-                    # Optimization: Skip check entirely if all conditions are met:
-                    # 1. No new streams to analyze (all have been checked)
-                    # 2. Stream count matches previous check (no additions/deletions)
-                    # 3. Set of stream IDs is identical (no stream replacements)
-                    previous_stream_count = len(checked_stream_ids)
-                    current_stream_count = len(current_stream_ids)
-
-                    if (current_stream_count == previous_stream_count and
-                        set(current_stream_ids) == set(checked_stream_ids)):
-                        logger.info(f"Channel {channel_name} unchanged since last check - skipping reorder")
-                        # Update timestamp but keep existing checked_stream_ids
-                        self._complete_channel_check(
-                            channel_id,
-                            lambda: self.update_tracker.mark_channel_checked(
-                                channel_id,
-                                stream_count=current_stream_count,
-                                checked_stream_ids=checked_stream_ids
-                            ),
-                            queue_entry_token=queue_entry_token,
-                        )
-                        # Best effort to reconstruct stats for skipped/cached streams
-                        cached_stats = []
-                        for s in streams_already_checked:
-                            # Try to find existing stats if available in stream object
-                            # Otherwise use placeholders
-                            extracted_stats = extract_stream_stats(s)
-                            formatted_stats = format_stream_stats_for_display(extracted_stats)
-
-                            cached_for_score = {
-                                'stream_id': s.get('id'),
-                                'stream_name': s.get('name'),
-                                'stream_url': s.get('url'),
-                                'bitrate_kbps': extracted_stats.get('bitrate_kbps'),
-                                'scoring_bitrate_kbps': (
-                                    self._previous_stream_bitrate(s)
-                                    if extracted_stats.get('bitrate_kbps') is None
-                                    else None
-                                ),
-                                'resolution': extracted_stats.get('resolution'),
-                                'fps': extracted_stats.get('fps'),
-                                'video_codec': extracted_stats.get('video_codec'),
-                                'audio_codec': extracted_stats.get('audio_codec'),
-                                'hdr_format': extracted_stats.get('hdr_format'),
-                                'status': 'cached'
-                            }
-
-                            temp_score = self._calculate_stream_score(cached_for_score, priority_m3u_ids, priority_mode, scoring_weights)
-
-                            stat = {
-                                'stream_id': s.get('id'),
-                                'stream_name': s.get('name'),
-                                'resolution': formatted_stats['resolution'],
-                                'fps': formatted_stats['fps'],
-                                'video_codec': formatted_stats['video_codec'],
-                                'bitrate': formatted_stats['bitrate'],
-                                'm3u_account': self._get_m3u_account_name(s.get('id'), udi) if hasattr(self, '_get_m3u_account_name') else 'N/A',
-                                'score': temp_score
-                            }
-                            cached_stats.append(stat)
-
-                        return {
-                            'dead_streams_count': 0,
-                            'revived_streams_count': 0,
-                            'dead_streams': [],
-                            'revived_streams': [],
-                            'skipped_streams_count': len(streams_already_checked) + len(active_viewer_skipped_streams),
-                            'skipped_streams': (
-                                [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked]
-                                + active_viewer_skipped_streams
-                            ),
-                            'preflight_inspection': inspection_result([]),
-                            'checked_streams': cached_stats
-                        }
-                    else:
-                        logger.info(f"Channel composition changed (prev: {previous_stream_count}, curr: {current_stream_count}) - will reorder")
+                    # Reuse measurements, but always apply the current profile's
+                    # ranking and limits to the complete assignment. An unchanged
+                    # source list does not imply unchanged selection policy.
 
             # Streams that are actively analyzed in this pass. Used to gate
             # dead_stream_ids mutations — only streams checked in THIS pass may
