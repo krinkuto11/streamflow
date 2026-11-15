@@ -215,6 +215,26 @@ def test_bulk_refresh_cannot_bypass_pending_account_and_continues_other_accounts
     assert send.call_args.args[0].endswith('/refresh/10/')
 
 
+@pytest.mark.parametrize('target', [9, None])
+def test_refresh_keeps_its_original_target_if_connection_settings_change(monkeypatch, account, target):
+    base_url = Mock(side_effect=['http://original.invalid', 'http://changed.invalid'])
+    monkeypatch.setattr(api_utils, '_get_base_url', base_url)
+    accounts = [account, {**account, 'id': 10}]
+    reads = []
+
+    def fetch(url):
+        reads.append(url)
+        return accounts if url.endswith('/accounts/') else accounts[1] if url.endswith('/10/') else account
+
+    monkeypatch.setattr(api_utils, 'fetch_data_from_url', fetch)
+    send = Mock(return_value=accepted())
+    monkeypatch.setattr(api_utils, 'post_request', send)
+    assert api_utils.refresh_m3u_playlists(target).status_code == 202
+    assert base_url.call_count == 1
+    assert all(url.startswith('http://original.invalid/') for url in reads)
+    assert all(call.args[0].startswith('http://original.invalid/') for call in send.call_args_list)
+
+
 def test_concurrent_process_style_claims_use_database_atomicity(tmp_path, monkeypatch, account):
     from concurrent.futures import ThreadPoolExecutor
     import threading
