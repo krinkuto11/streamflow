@@ -11,6 +11,29 @@ def _ensure_dict(payload: Any, *, message: str) -> Dict[str, Any]:
     return payload
 
 
+@dataclass(frozen=True)
+class M3URefreshResolutionSchema:
+    account_id: int
+    attempt_id: str
+    confirmed_finished: bool
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> "M3URefreshResolutionSchema":
+        from uuid import UUID
+
+        data = _ensure_dict(payload, message='Resolution data is required')
+        account_id = data.get('account_id')
+        if type(account_id) is not int or account_id <= 0:
+            raise ValidationError('account_id must be a positive integer')
+        try:
+            attempt_id = str(UUID(data.get('attempt_id', '')))
+        except (ValueError, TypeError, AttributeError):
+            raise ValidationError('attempt_id must identify the pending refresh start') from None
+        if data.get('confirmed_finished') is not True:
+            raise ValidationError('Confirm that both live and VOD refresh tasks have finished or stopped in Dispatcharr')
+        return cls(account_id=account_id, attempt_id=attempt_id, confirmed_finished=True)
+
+
 def _parse_bool(value: Any, *, field_name: str) -> bool:
     if isinstance(value, bool):
         return value

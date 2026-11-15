@@ -1181,6 +1181,15 @@ def handle_global_automation_settings():
         get_automation_manager=get_automation_manager,
     )
 
+
+@app.route('/api/m3u-refresh/attempts', methods=['GET'])
+@app.route('/api/m3u-refresh/attempts/resolve', methods=['POST'])
+def handle_m3u_refresh_attempts():
+    from apps.api.m3u_refresh_handlers import m3u_refresh_attempts_response
+
+    return m3u_refresh_attempts_response(method=request.method, payload=request.get_json(silent=True))
+
+
 @app.route('/api/regex-patterns/mass-edit-preview', methods=['POST'])
 def mass_edit_preview():
     """Preview the results of a mass find/replace operation on regex patterns.
