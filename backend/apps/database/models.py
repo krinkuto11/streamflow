@@ -104,6 +104,22 @@ class M3UAccount(Base):
     groups = relationship("ChannelGroup", secondary=group_accounts, back_populates="accounts")
 
 
+class M3URefreshAttempt(Base):
+    """Write-ahead protection for refresh starts with an uncertain outcome.
+
+    Independent of the UDI cache lifecycle and scoped to the Dispatcharr server.
+    No foreign key: refreshing/rebuilding cached accounts must not lose protection.
+    """
+
+    __tablename__ = 'm3u_refresh_attempts'
+
+    server_scope = Column(String(64), primary_key=True)
+    account_id = Column(Integer, primary_key=True)
+    attempt_id = Column(String(36), nullable=False)
+    started_at = Column(Float, nullable=False)
+    state = Column(String(20), nullable=False)
+
+
 class M3UAccountProfile(Base):
     __tablename__ = 'm3u_account_profiles'
     

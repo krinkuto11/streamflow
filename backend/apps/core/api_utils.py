@@ -566,19 +566,52 @@ def refresh_m3u_playlists(
     Raises:
         Exception: If the API request fails.
     """
-    base_url = _get_base_url()
-    if account_id:
-        url = f"{base_url}/api/m3u/refresh/{account_id}/"
-    else:
-        url = f"{base_url}/api/m3u/refresh/"
-    
     try:
-        resp = post_request(url, {})
-        logger.info("M3U refresh request accepted by Dispatcharr")
-        return resp
+        base_url = _get_base_url().rstrip('/')
+        guard = get_m3u_refresh_guard(base_url)
+
+        def start_account(target_id):
+            response = guard.start(target_id, lambda: post_request(
+                f'{base_url}/api/m3u/refresh/{target_id}/', {},
+            ))
+            logger.info("M3U refresh request accepted by Dispatcharr")
+            return response
+
+        if account_id is None:
+            # Split bulk starts so a pending individual operation cannot be
+            # bypassed by the refresh-all endpoint (or vice versa).
+            accounts = fetch_data_from_url(f'{base_url}/api/m3u/accounts/')
+            if not isinstance(accounts, list) or not accounts:
+                raise requests.exceptions.RequestException('Could not verify M3U accounts; bulk refresh was not sent')
+            responses, failed = [], []
+            for account in accounts:
+                if not account.get('is_active', True) or str(account.get('name', '')).lower() == 'custom':
+                    continue
+                try:
+                    responses.append(start_account(int(account['id'])))
+                except requests.exceptions.RequestException:
+                    failed.append(account['id'])
+            if failed:
+                raise requests.exceptions.RequestException(
+                    f'M3U refresh could not start for account IDs {failed}; other eligible accounts were processed'
+                )
+            if not responses:
+                raise requests.exceptions.RequestException('No eligible accounts for bulk refresh')
+            return responses[-1]
+        account_id = int(account_id)
+        return start_account(account_id)
     except Exception as e:
         logger.error(f"Failed to refresh M3U playlists: {e}")
         raise
+
+
+def get_m3u_refresh_guard(base_url: Optional[str] = None):
+    from apps.core.m3u_refresh_guard import M3URefreshGuard
+
+    base_url = (base_url if base_url is not None else _get_base_url()).rstrip('/')
+    return M3URefreshGuard(base_url, lambda account_id: fetch_data_from_url(
+        f'{base_url}/api/m3u/accounts/{account_id}/',
+    ))
 
 
 def get_m3u_accounts() -> Optional[List[Dict[str, Any]]]:

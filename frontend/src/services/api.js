@@ -47,6 +47,8 @@ api.interceptors.response.use(
 export const automationAPI = {
   // Status and Control
   getStatus: (options) => api.get('/automation/status', options),
+  getRefreshAttempts: () => api.get('/m3u-refresh/attempts'),
+  resolveRefreshAttempt: (resolution) => api.post('/m3u-refresh/attempts/resolve', resolution),
   start: () => api.post('/automation/start'),
   stop: () => api.post('/automation/stop'),
   abortRun: () => api.post('/automation/abort-run'),

@@ -30,6 +30,34 @@ Profiles live in `automation_config.json` under `profiles`. A profile has three 
 - `enabled` — run the M3U refresh step
 - `playlists` — list of playlist IDs to update (empty = all)
 
+### Playlist refresh protection
+
+If Dispatcharr may have accepted a refresh start but its HTTP reply is lost,
+StreamFlow stores that uncertainty in its database before allowing any further
+start. The protection survives restarts and applies to automatic, manual,
+single-channel and bulk refresh requests for the same Dispatcharr account.
+Other accounts can still refresh. A failed run can remain due without sending
+another POST for the protected account.
+
+Inspect unresolved starts under **Settings → Scheduling → Playlist refresh
+protection**. Select **Reload refresh status** to read the current account
+status directly from Dispatcharr. A successful or idle live-import status does
+not establish completion of the separately queued VOD work in Dispatcharr 0.33.
+
+After verifying in Dispatcharr that both the live import and any VOD tasks have
+finished or stopped, select the confirmation checkbox and **Allow future
+refreshes**. This removes protection for that specific start; it does not trigger
+a refresh. The action is rejected while a current start request may still be
+in flight, Dispatcharr reports a busy account, its status is unavailable, or
+the displayed attempt has changed. Protection does not expire automatically.
+
+The HTTP start acknowledgement still has a 30-second timeout (backend-only).
+Refresh-completion monitoring has a separate timeout; increasing that wait or
+switching **Settings → Scheduling → Automation Run Policy → Retry failed M3U
+providers** off does not resolve an ambiguous start. To let Dispatcharr own the
+schedule while investigating, disable **Settings → Profiles → edit profile →
+Playlist Updating** for the affected profile.
+
 ### `stream_matching`
 
 ```json
