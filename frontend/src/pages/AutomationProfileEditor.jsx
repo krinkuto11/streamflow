@@ -456,7 +456,7 @@ export default function AutomationProfileEditor() {
                                         />
                                         <div className="space-y-0.5">
                                             <Label htmlFor="preserve_custom_streams" className="cursor-pointer font-medium">Keep Custom Streams</Label>
-                                            <p className="text-[10px] text-muted-foreground">When validating, never remove custom streams (e.g. a fallback stream added by a Dispatcharr plugin).</p>
+                                            <p className="text-[10px] text-muted-foreground">Never remove custom streams (e.g. a fallback stream added by a Dispatcharr plugin) during validation or stream checking; they stay last in the channel.</p>
                                         </div>
                                     </div>
                                 </div>

@@ -70,7 +70,7 @@ Playlist Updating** for the affected profile.
 
 - `enabled` — run the stream matching step
 - `validate_existing_streams` — when `true`, remove streams currently assigned to the channel if they no longer match any of the channel's patterns
-- `preserve_custom_streams` — when `true`, validation never removes custom streams (`is_custom`), such as a fallback stream added by a Dispatcharr plugin
+- `preserve_custom_streams` — when `true`, custom streams (`is_custom`), such as a fallback stream added by a Dispatcharr plugin, are never removed by validation or by the stream checker (dead-stream removal, stream limit and quality reordering). They are kept at the end of the channel's stream list
 
 ### `stream_checking`
 

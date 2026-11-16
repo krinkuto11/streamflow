@@ -136,6 +136,37 @@ class CheckerInventoryMixin:
 
 
     @staticmethod
+    def _custom_stream_ids(streams: List[Dict[str, Any]]) -> List[int]:
+        """Return assigned custom stream IDs (``is_custom``), in channel order."""
+        ids: List[int] = []
+        for stream in streams or []:
+            if not isinstance(stream, dict) or not stream.get('is_custom'):
+                continue
+            try:
+                ids.append(int(stream.get('id')))
+            except (TypeError, ValueError):
+                continue
+        return ids
+
+
+    @staticmethod
+    def _append_custom_stream_ids(
+        reordered_ids: List[int],
+        custom_stream_ids: List[int],
+    ) -> List[int]:
+        """Return ``reordered_ids`` without custom streams, then custom streams last.
+
+        Used when a profile enables ``stream_matching.preserve_custom_streams`` so a
+        fallback stream added by a Dispatcharr plugin is never probed away, cut by
+        the stream limit or re-ranked above real streams.
+        """
+        custom = set(custom_stream_ids or [])
+        if not custom:
+            return list(reordered_ids)
+        return [sid for sid in reordered_ids if sid not in custom] + list(custom_stream_ids)
+
+
+    @staticmethod
     def _limit_write_back_stream_ids(
         stream_ids: List[int],
         stream_limit: int,
