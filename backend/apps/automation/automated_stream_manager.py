@@ -4087,6 +4087,7 @@ class AutomatedStreamManager:
             # Get settings for this channel
             settings = channel_validation_settings.get(channel_id, {})
             validate_enabled = settings.get("validate_enabled", False)
+            preserve_custom = settings.get("preserve_custom_streams", False)
             
             # Get streams for this channel
             channel_streams = udi.get_channel_streams(channel_id)
@@ -4107,6 +4108,13 @@ class AutomatedStreamManager:
                 full_stream = stream_lookup.get(stream_id)
                 if not full_stream:
                     # Stream not found in UDI, keep it safe
+                    streams_to_keep.append(stream_id)
+                    continue
+                
+                # Custom streams (e.g. a fallback/slate added by a plugin) have no
+                # provider name to match against; optionally never treat them as
+                # regex mismatches.
+                if preserve_custom and full_stream.get('is_custom', False):
                     streams_to_keep.append(stream_id)
                     continue
                 
@@ -5103,7 +5111,10 @@ class AutomatedStreamManager:
                 if matching_enabled:
                     matching_enabled_channel_ids.append(channel_id)
                     channel_validation_settings[channel_id] = {
-                        "validate_enabled": validate_enabled
+                        "validate_enabled": validate_enabled,
+                        "preserve_custom_streams": bool(
+                            profile.get('stream_matching', {}).get('preserve_custom_streams', False)
+                        ),
                     }
 
             # Legacy fallback: before automation profiles existed, validation

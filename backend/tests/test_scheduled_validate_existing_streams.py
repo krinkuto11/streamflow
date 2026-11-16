@@ -37,12 +37,13 @@ CHANNEL_STREAMS = {
 }
 
 
-def _profile(*, validate_existing_streams, global_action_affected=False):
+def _profile(*, validate_existing_streams, global_action_affected=False, preserve_custom_streams=None):
     return {
         'name': 'Test Profile',
         'stream_matching': {
             'enabled': True,
             'validate_existing_streams': validate_existing_streams,
+            **({} if preserve_custom_streams is None else {'preserve_custom_streams': preserve_custom_streams}),
         },
         'global_action': {'affected': global_action_affected},
     }
@@ -135,6 +136,27 @@ class TestValidateExistingStreamsIsAuthoritative(unittest.TestCase):
 
         self.mock_update_streams.assert_called_once()
         self.assertEqual(results['streams_removed'], 1)
+
+    def _add_custom_stream(self):
+        custom = {'id': 900, 'name': 'Could Not Dispatch', 'm3u_account': None, 'is_custom': True}
+        self.addCleanup(lambda: (STREAMS.remove(custom), CHANNEL_STREAMS[1].remove(
+            {'id': 900, 'name': 'Could Not Dispatch'})))
+        STREAMS.append(custom)
+        CHANNEL_STREAMS[1].append({'id': 900, 'name': 'Could Not Dispatch'})
+
+    def test_custom_stream_removed_by_default(self):
+        self._add_custom_stream()
+        self._run(force=False, profile=_profile(validate_existing_streams=True))
+        self.assertEqual(self.mock_update_streams.call_args[0][1], [101])
+
+    def test_custom_stream_kept_when_preserve_enabled(self):
+        self._add_custom_stream()
+        results = self._run(
+            force=False,
+            profile=_profile(validate_existing_streams=True, preserve_custom_streams=True),
+        )
+        self.assertEqual(self.mock_update_streams.call_args[0][1], [101, 900])
+        self.assertEqual(results['streams_removed'], 1)  # only the Sports stream
 
 
 if __name__ == '__main__':

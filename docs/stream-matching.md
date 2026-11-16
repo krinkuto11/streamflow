@@ -77,4 +77,6 @@ Assign a pattern to multiple channels at once from the UI (**Channel Configurati
 
 When `validate_existing_streams: true` is set on an Automation Profile, streams currently assigned to a channel are checked against the channel's patterns after each match step. Streams that no longer match any pattern are removed.
 
-This setting is per-profile and only applies when the matching step is enabled for that profile.
+Enable `preserve_custom_streams` on the same profile to exempt custom streams (for example a fallback/slate stream added by a Dispatcharr plugin) from this removal.
+
+These settings are per-profile and only apply when the matching step is enabled for that profile.

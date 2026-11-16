@@ -28,7 +28,8 @@ const DEFAULT_PROFILE = {
     },
     stream_matching: {
         enabled: true,
-        validate_existing_streams: false
+        validate_existing_streams: false,
+        preserve_custom_streams: false
     },
     stream_checking: {
         enabled: true,
@@ -445,6 +446,17 @@ export default function AutomationProfileEditor() {
                                         <div className="space-y-0.5">
                                             <Label htmlFor="validate_streams" className="cursor-pointer font-medium">Validate Existing Streams</Label>
                                             <p className="text-[10px] text-muted-foreground">Remove streams that no longer match the channel's Regex rules.</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center space-x-3 bg-muted/50 p-3 rounded-md">
+                                        <Switch
+                                            id="preserve_custom_streams"
+                                            checked={!!profile.stream_matching.preserve_custom_streams}
+                                            onCheckedChange={(checked) => updateProfile('stream_matching.preserve_custom_streams', checked)}
+                                        />
+                                        <div className="space-y-0.5">
+                                            <Label htmlFor="preserve_custom_streams" className="cursor-pointer font-medium">Keep Custom Streams</Label>
+                                            <p className="text-[10px] text-muted-foreground">When validating, never remove custom streams (e.g. a fallback stream added by a Dispatcharr plugin).</p>
                                         </div>
                                     </div>
                                 </div>
