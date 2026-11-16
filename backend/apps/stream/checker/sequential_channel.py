@@ -99,7 +99,6 @@ class CheckerSequentialChannelMixin:
 
         # Get effective profile for this channel
         stream_limit = 0
-        preserve_custom_streams = False
         allow_revive = True
         grace_period = False
         loop_check_enabled = False
@@ -136,9 +135,6 @@ class CheckerSequentialChannelMixin:
                 profile = config.get('profile') if config else None
             if profile:
                 profile_stream_checking = profile.get('stream_checking', {})
-                preserve_custom_streams = bool(
-                    profile.get('stream_matching', {}).get('preserve_custom_streams', False)
-                )
                 stream_limit = profile_stream_checking.get('stream_limit', 0)
                 allow_revive = profile_stream_checking.get('allow_revive', True)
                 priority_m3u_ids = profile_stream_checking.get('m3u_priority', [])
@@ -1002,11 +998,6 @@ class CheckerSequentialChannelMixin:
             # Remove dead streams from the channel (if enabled in config)
             # Dead streams are checked during all channel checks (normal and global)
             # If they're still dead, they're removed; if revived, they remain
-            custom_stream_ids = self._custom_stream_ids(streams) if preserve_custom_streams else []
-            if custom_stream_ids:
-                # Custom streams (e.g. a plugin's fallback slate) are never treated as dead here.
-                dead_stream_ids = set(dead_stream_ids) - set(custom_stream_ids)
-
             if dead_stream_ids:
                 if dead_stream_removal_enabled:
                     logger.warning(f"🔴 Removing {len(dead_stream_ids)} dead streams from channel {channel_name}")
@@ -1072,11 +1063,6 @@ class CheckerSequentialChannelMixin:
                 protected_active_stream_ids,
             )
 
-            protected_write_stream_ids = set(protected_active_stream_ids)
-            if custom_stream_ids:
-                reordered_ids = self._append_custom_stream_ids(reordered_ids, custom_stream_ids)
-                protected_write_stream_ids |= set(custom_stream_ids)
-
             write_back_valid_stream_ids = self._build_write_back_valid_stream_ids(
                 udi,
                 dead_stream_removal_enabled,
@@ -1118,7 +1104,7 @@ class CheckerSequentialChannelMixin:
                     reordered_ids,
                     valid_stream_ids=write_back_valid_stream_ids,
                     allow_dead_streams=(not dead_stream_removal_enabled),
-                    protected_stream_ids=protected_write_stream_ids,
+                    protected_stream_ids=protected_active_stream_ids,
                     expected_current_stream_ids=assigned_stream_ids,
                 ),
             )

@@ -2,7 +2,7 @@
 
 import logging
 from apps.core.provider_profile_access import checking_accounts
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("apps.stream.stream_checker_service")
 
@@ -147,6 +147,42 @@ class CheckerInventoryMixin:
             except (TypeError, ValueError):
                 continue
         return ids
+
+
+    def _split_preserved_custom_streams(
+        self,
+        streams: List[Dict[str, Any]],
+        enabled: bool,
+    ) -> Tuple[List[Dict[str, Any]], List[int]]:
+        """Separate preserved custom streams from the streams the checker evaluates.
+
+        With ``stream_matching.preserve_custom_streams`` on, custom streams (for
+        example a fallback/slate added by a Dispatcharr plugin) must not be probed,
+        scored, marked dead or counted against the stream limit. They are returned
+        separately so the write-back can append them after the real streams.
+        Any stale dead marker left from an earlier run is cleared so no other write
+        path can drop them.
+        """
+        if not enabled:
+            return streams, []
+        custom_ids = self._custom_stream_ids(streams)
+        if not custom_ids:
+            return streams, []
+        custom_set = set(custom_ids)
+        normal_streams = []
+        for stream in streams:
+            try:
+                is_preserved = int(stream.get('id')) in custom_set
+            except (AttributeError, TypeError, ValueError):
+                is_preserved = False
+            if not is_preserved:
+                normal_streams.append(stream)
+                continue
+            url = stream.get('url')
+            tracker = getattr(self, 'dead_streams_tracker', None)
+            if url and tracker is not None and tracker.is_dead(url):
+                tracker.mark_as_alive(url)
+        return normal_streams, custom_ids
 
 
     @staticmethod

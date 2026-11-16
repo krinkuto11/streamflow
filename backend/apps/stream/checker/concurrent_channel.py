@@ -102,6 +102,7 @@ class CheckerConcurrentChannelMixin:
         # Get effective profile for this channel
         stream_limit = 0
         preserve_custom_streams = False
+        custom_stream_ids = []
         provider_stream_limit = 0
         allow_revive = True
         grace_period = False
@@ -265,6 +266,12 @@ class CheckerConcurrentChannelMixin:
             )
 
             streams = self._checker_fetch_channel_streams(channel_id)
+            # Preserved custom streams (e.g. a plugin's fallback stream) are taken out
+            # of the evaluated set up front: never probed, scored, marked dead or
+            # counted against the stream limit. They are appended last at write-back.
+            streams, custom_stream_ids = self._split_preserved_custom_streams(
+                streams, preserve_custom_streams
+            )
             abort_result = self._abort_channel_check_if_requested(
                 channel_id,
                 channel_name,
@@ -1061,11 +1068,6 @@ class CheckerConcurrentChannelMixin:
             # Remove dead streams from the channel (if enabled in config)
             # Dead streams are checked during all channel checks (normal and global)
             # If they're still dead, they're removed; if revived, they remain
-            custom_stream_ids = self._custom_stream_ids(streams) if preserve_custom_streams else []
-            if custom_stream_ids:
-                # Custom streams (e.g. a plugin's fallback slate) are never treated as dead here.
-                dead_stream_ids = set(dead_stream_ids) - set(custom_stream_ids)
-
             if dead_stream_ids:
                 if dead_stream_removal_enabled:
                     logger.warning(f"🔴 Removing {len(dead_stream_ids)} dead streams from channel {channel_name}")
@@ -1108,7 +1110,7 @@ class CheckerConcurrentChannelMixin:
             # already been truncated by the profile stream limit.
             _uncached_ids = self._get_uncached_channel_stream_ids(
                 assigned_stream_ids,
-                set(current_stream_ids),
+                set(current_stream_ids) | set(custom_stream_ids),
                 dead_stream_removal_enabled,
                 dead_stream_ids,
             )
