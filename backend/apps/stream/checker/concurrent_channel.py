@@ -101,6 +101,8 @@ class CheckerConcurrentChannelMixin:
 
         # Get effective profile for this channel
         stream_limit = 0
+        preserve_custom_streams = False
+        custom_stream_ids = []
         provider_stream_limit = 0
         allow_revive = True
         grace_period = False
@@ -155,6 +157,9 @@ class CheckerConcurrentChannelMixin:
                 profile = config.get('profile') if config else None
             if profile:
                 profile_stream_checking = profile.get('stream_checking', {})
+                preserve_custom_streams = bool(
+                    profile.get('stream_matching', {}).get('preserve_custom_streams', False)
+                )
                 stream_limit = profile_stream_checking.get('stream_limit', 0)
                 provider_stream_limit = profile_stream_checking.get('provider_stream_limit', 0)
                 allow_revive = profile_stream_checking.get('allow_revive', True)
@@ -261,6 +266,12 @@ class CheckerConcurrentChannelMixin:
             )
 
             streams = self._checker_fetch_channel_streams(channel_id)
+            # Preserved custom streams (e.g. a plugin's fallback stream) are taken out
+            # of the evaluated set up front: never probed, scored, marked dead or
+            # counted against the stream limit. They are appended last at write-back.
+            streams, custom_stream_ids = self._split_preserved_custom_streams(
+                streams, preserve_custom_streams
+            )
             abort_result = self._abort_channel_check_if_requested(
                 channel_id,
                 channel_name,
@@ -1099,7 +1110,7 @@ class CheckerConcurrentChannelMixin:
             # already been truncated by the profile stream limit.
             _uncached_ids = self._get_uncached_channel_stream_ids(
                 assigned_stream_ids,
-                set(current_stream_ids),
+                set(current_stream_ids) | set(custom_stream_ids),
                 dead_stream_removal_enabled,
                 dead_stream_ids,
             )
@@ -1119,6 +1130,11 @@ class CheckerConcurrentChannelMixin:
                 stream_provider_ids={item['id']: self._get_stream_m3u_account_id(item)
                                      for item in streams},
             )
+
+            protected_write_stream_ids = set(protected_active_stream_ids)
+            if custom_stream_ids:
+                reordered_ids = self._append_custom_stream_ids(reordered_ids, custom_stream_ids)
+                protected_write_stream_ids |= set(custom_stream_ids)
 
             write_back_valid_stream_ids = self._build_write_back_valid_stream_ids(
                 udi,
@@ -1162,7 +1178,7 @@ class CheckerConcurrentChannelMixin:
                     reordered_ids,
                     valid_stream_ids=write_back_valid_stream_ids,
                     allow_dead_streams=(not dead_stream_removal_enabled),
-                    protected_stream_ids=protected_active_stream_ids,
+                    protected_stream_ids=protected_write_stream_ids,
                     expected_current_stream_ids=assigned_stream_ids,
                 ),
             )

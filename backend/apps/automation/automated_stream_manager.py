@@ -4087,6 +4087,7 @@ class AutomatedStreamManager:
             # Get settings for this channel
             settings = channel_validation_settings.get(channel_id, {})
             validate_enabled = settings.get("validate_enabled", False)
+            preserve_custom = settings.get("preserve_custom_streams", False)
             
             # Get streams for this channel
             channel_streams = udi.get_channel_streams(channel_id)
@@ -4095,6 +4096,7 @@ class AutomatedStreamManager:
             
             streams_to_keep = []
             streams_to_remove = []
+            protected_custom_ids = []
             
             for stream in channel_streams:
                 if not isinstance(stream, dict) or 'id' not in stream:
@@ -4108,6 +4110,14 @@ class AutomatedStreamManager:
                 if not full_stream:
                     # Stream not found in UDI, keep it safe
                     streams_to_keep.append(stream_id)
+                    continue
+                
+                # Custom streams (e.g. a fallback/slate added by a plugin) have no
+                # provider name to match against; optionally never treat them as
+                # regex mismatches.
+                if preserve_custom and full_stream.get('is_custom', False):
+                    streams_to_keep.append(stream_id)
+                    protected_custom_ids.append(stream_id)
                     continue
                 
                 stream_name = full_stream.get('name', stream_name_in_channel)
@@ -4144,6 +4154,7 @@ class AutomatedStreamManager:
                     "removed_count": len(streams_to_remove),
                     "removed_streams": streams_to_remove,
                     "kept_ids": streams_to_keep,
+                    "protected_ids": protected_custom_ids,
                     "validate_enabled": validate_enabled
                 })
                 
@@ -5103,7 +5114,10 @@ class AutomatedStreamManager:
                 if matching_enabled:
                     matching_enabled_channel_ids.append(channel_id)
                     channel_validation_settings[channel_id] = {
-                        "validate_enabled": validate_enabled
+                        "validate_enabled": validate_enabled,
+                        "preserve_custom_streams": bool(
+                            profile.get('stream_matching', {}).get('preserve_custom_streams', False)
+                        ),
                     }
 
             # Legacy fallback: before automation profiles existed, validation
@@ -5220,7 +5234,14 @@ class AutomatedStreamManager:
                             if channel_validate_enabled:
                                 try:
                                     # Update channel with kept streams
-                                    success = update_channel_streams(channel_id, kept_ids, allow_dead_streams=(not dead_stream_removal_enabled))
+                                    success = update_channel_streams(
+                                        channel_id,
+                                        kept_ids,
+                                        allow_dead_streams=(not dead_stream_removal_enabled),
+                                        # Preserved custom streams must survive the writer's
+                                        # dead-stream filter, not just this keep list.
+                                        protected_stream_ids=set(detail.get("protected_ids") or []),
+                                    )
                                     
                                     if success:
                                         validation_results["streams_removed"] += len(removed_streams)
